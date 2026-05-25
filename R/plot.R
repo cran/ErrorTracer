@@ -4,11 +4,12 @@
 # et_plot_decomposition(): stacked bar of variance components
 # ______________________________________________________________________________
 
-#' Plot three-way uncertainty decomposition
+#' Plot uncertainty decomposition
 #'
 #' Produces a stacked bar chart showing the relative contributions of
-#' parameter uncertainty, environmental uncertainty, and residual variance
-#' for each observation.
+#' parameter, environmental, and residual variance for each observation,
+#' plus a fourth temporal-autocorrelation component when present in
+#' \code{decomp} (see \code{\link{decompose_uncertainty}}).
 #'
 #' @param decomp A \code{data.frame} from \code{\link{decompose_uncertainty}}
 #'   or directly the \code{$decomposition} slot of an \code{et_prediction}.
@@ -21,14 +22,24 @@
 #' @export
 et_plot_decomposition <- function(decomp, proportional = TRUE,
                                    group_col = NULL) {
-  # Convert to long format
-  long <- .pivot_decomp(decomp, c("param_var", "env_var", "residual_var"))
+  components <- c("param_var", "env_var", "residual_var")
+  if ("temporal_var" %in% colnames(decomp)) {
+    components <- c(components, "temporal_var")
+  }
+  long <- .pivot_decomp(decomp, components)
 
   x_col <- if (!is.null(group_col) && group_col %in% colnames(decomp)) {
     group_col
   } else {
     "obs_id"
   }
+
+  fill_values <- c(
+    "Parameter"     = "#2166AC",
+    "Environmental" = "#4DAC26",
+    "Residual"      = "#D1E5F0",
+    "Temporal"      = "#B2182B"
+  )
 
   p <- ggplot2::ggplot(long, ggplot2::aes(
     x    = .data[[x_col]],
@@ -38,14 +49,7 @@ et_plot_decomposition <- function(decomp, proportional = TRUE,
     ggplot2::geom_col(
       position = if (proportional) "fill" else "stack"
     ) +
-    ggplot2::scale_fill_manual(
-      values = c(
-        "Parameter"    = "#2166AC",
-        "Environmental" = "#4DAC26",
-        "Residual"     = "#D1E5F0"
-      ),
-      name = "Component"
-    ) +
+    ggplot2::scale_fill_manual(values = fill_values, name = "Component") +
     ggplot2::labs(
       title = "Uncertainty Decomposition",
       x     = if (x_col == "obs_id") "Observation" else x_col,
@@ -115,10 +119,33 @@ et_plot_shelf_life <- function(sl, show_ratio = TRUE) {
 #' below indicates under-coverage (anti-conservative).
 #'
 #' @param cal A \code{data.frame} from \code{\link{et_calibrate}}.
+#' @param group_col Optional character.  Name of a column in \code{cal} that
+#'   identifies sub-groups (e.g.\ \code{"species"}, \code{"cluster_id"}).
+#'   When \code{NULL} (default), \code{et_plot_calibration} uses the
+#'   \code{group} column if present; otherwise it auto-detects any single
+#'   non-canonical column with more than one unique value and treats it as
+#'   the grouping.  Set to \code{NA} to force a single un-grouped series.
 #' @return A \code{ggplot2} object.
 #' @export
-et_plot_calibration <- function(cal) {
-  has_group <- "group" %in% colnames(cal)
+et_plot_calibration <- function(cal, group_col = NULL) {
+  canonical <- c("ci_level", "nominal", "observed_coverage",
+                 "n_obs", "calibration_error", "sharpness")
+
+  if (is.null(group_col)) {
+    if ("group" %in% colnames(cal)) {
+      group_col <- "group"
+    } else {
+      extras <- setdiff(colnames(cal), canonical)
+      extras <- extras[vapply(extras,
+                              function(x) length(unique(cal[[x]])) > 1,
+                              logical(1))]
+      if (length(extras) == 1L) group_col <- extras
+    }
+  } else if (is.na(group_col)) {
+    group_col <- NULL
+  }
+
+  has_group <- !is.null(group_col) && group_col %in% colnames(cal)
 
   p <- ggplot2::ggplot(cal, ggplot2::aes(
     x = .data[["nominal"]],
@@ -137,10 +164,10 @@ et_plot_calibration <- function(cal) {
   if (has_group) {
     p <- p +
       ggplot2::geom_line(ggplot2::aes(
-        color = .data[["group"]], group = .data[["group"]]
+        color = .data[[group_col]], group = .data[[group_col]]
       ), alpha = 0.6) +
-      ggplot2::geom_point(ggplot2::aes(color = .data[["group"]]), size = 3) +
-      ggplot2::scale_color_viridis_d(name = "Group")
+      ggplot2::geom_point(ggplot2::aes(color = .data[[group_col]]), size = 3) +
+      ggplot2::scale_color_viridis_d(name = group_col)
   } else {
     p <- p +
       ggplot2::geom_line(alpha = 0.7) +
@@ -496,6 +523,7 @@ scales_percent_safe <- function(x) {
       param_var    = "Parameter",
       env_var      = "Environmental",
       residual_var = "Residual",
+      temporal_var = "Temporal",
       col
     )
     df <- decomp[, c(setdiff(colnames(decomp), cols), col), drop = FALSE]

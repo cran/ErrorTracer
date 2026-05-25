@@ -12,7 +12,7 @@
 
 <meta name="author" content="Luis Javier Madrigal-Roca, John Kelly" />
 
-<meta name="date" content="2026-04-29" />
+<meta name="date" content="2026-05-25" />
 
 <title>Getting Started with ErrorTracer</title>
 
@@ -342,7 +342,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 <h3 class="subtitle">Bayesian error propagation and forecast uncertainty
 decomposition</h3>
 <h4 class="author">Luis Javier Madrigal-Roca, John Kelly</h4>
-<h4 class="date">2026-04-29</h4>
+<h4 class="date">2026-05-25</h4>
 
 
 <div id="TOC">
@@ -371,7 +371,7 @@ model</a></li>
 model fit</a></li>
 <li><a href="#step-5-predict-with-environmental-noise-propagation" id="toc-step-5-predict-with-environmental-noise-propagation"><span class="toc-section-number">4.5</span> Step 5 — Predict with
 environmental noise propagation</a></li>
-<li><a href="#step-6-three-way-uncertainty-decomposition" id="toc-step-6-three-way-uncertainty-decomposition"><span class="toc-section-number">4.6</span> Step 6 — Three-way uncertainty
+<li><a href="#step-6-uncertainty-decomposition" id="toc-step-6-uncertainty-decomposition"><span class="toc-section-number">4.6</span> Step 6 — Uncertainty
 decomposition</a></li>
 <li><a href="#step-7-forecast-shelf-life" id="toc-step-7-forecast-shelf-life"><span class="toc-section-number">4.7</span> Step 7 — Forecast shelf
 life</a></li>
@@ -466,7 +466,8 @@ interval becomes too wide to be informative.</p>
 <tr class="odd">
 <td>5</td>
 <td><code>decompose_uncertainty()</code></td>
-<td>Three-way variance decomposition</td>
+<td>Variance decomposition (param / env / residual, plus temporal for
+autocor models)</td>
 </tr>
 <tr class="even">
 <td>6</td>
@@ -896,9 +897,9 @@ the mild warming trend pushing Tmean ~0.7–1.4 SDs above the training
 mean. CI widths are 1.64–1.77, somewhat narrower than the full plausible
 range of 2.</p>
 </div>
-<div id="step-6-three-way-uncertainty-decomposition" class="section level2" number="4.6">
-<h2><span class="header-section-number">4.6</span> Step 6 — Three-way
-uncertainty decomposition</h2>
+<div id="step-6-uncertainty-decomposition" class="section level2" number="4.6">
+<h2><span class="header-section-number">4.6</span> Step 6 — Uncertainty
+decomposition</h2>
 <div class="sourceCode" id="cb19"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" tabindex="-1"></a>decomp_A <span class="ot">&lt;-</span> <span class="fu">decompose_uncertainty</span>(pred_A)</span>
 <span id="cb19-2"><a href="#cb19-2" tabindex="-1"></a>decomp_A</span>
 <span id="cb19-3"><a href="#cb19-3" tabindex="-1"></a><span class="co">#   obs_id total_var param_var  env_var residual_var</span></span>
@@ -921,6 +922,20 @@ accounts for ~80% of total forecast variance, parameter uncertainty for
 substantially improve forecast precision for this system, the primary
 target should be the residual variance — identifying additional drivers
 of allele-frequency change.</p>
+<blockquote>
+<p><strong>Autocorrelation note.</strong> If you fit the model with a
+residual autocorrelation term
+(e.g. <code>et_fit(y ~ x + ar(time = t, p = 1), ...)</code>),
+<code>decompose_uncertainty()</code> adds a fourth column
+<code>temporal_var</code> defined as
+<code>pmax(0, total_var − (param_var + env_var + residual_var))</code>.
+It captures the autocorrelation-induced spread that
+<code>brms::posterior_predict()</code> accumulates iteratively beyond a
+single innovation, and <code>residual_var</code> is then interpretable
+as the <em>innovation</em> variance rather than the stationary marginal
+variance. <code>et_plot_decomposition()</code> shows the fourth segment
+automatically when the column is present.</p>
+</blockquote>
 </div>
 <div id="step-7-forecast-shelf-life" class="section level2" number="4.7">
 <h2><span class="header-section-number">4.7</span> Step 7 — Forecast
@@ -1442,7 +1457,7 @@ validating the pipeline’s statistical integrity.</p></li>
 <div id="session-information" class="section level1" number="12">
 <h1><span class="header-section-number">12</span> Session
 information</h1>
-<pre><code>#&gt; R version 4.5.3 (2026-03-11)
+<pre><code>#&gt; R version 4.6.0 (2026-04-24)
 #&gt; Platform: x86_64-pc-linux-gnu
 #&gt; Running under: Ubuntu 24.04.4 LTS
 #&gt; 
@@ -1468,7 +1483,7 @@ information</h1>
 #&gt;  [1] digest_0.6.39   R6_2.6.1        fastmap_1.2.0   xfun_0.57      
 #&gt;  [5] cachem_1.1.0    knitr_1.51      htmltools_0.5.9 rmarkdown_2.31 
 #&gt;  [9] lifecycle_1.0.5 cli_3.6.6       sass_0.4.10     jquerylib_0.1.4
-#&gt; [13] compiler_4.5.3  tools_4.5.3     evaluate_1.0.5  bslib_0.10.0   
+#&gt; [13] compiler_4.6.0  tools_4.6.0     evaluate_1.0.5  bslib_0.10.0   
 #&gt; [17] yaml_2.3.12     otel_0.2.0      rlang_1.2.0     jsonlite_2.0.0</code></pre>
 </div>
 
