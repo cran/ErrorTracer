@@ -131,13 +131,76 @@ test_that("temporal_var captures the autocor gap when has_autocor = TRUE", {
   expect_false("temporal_var" %in% colnames(d_iid))
   expect_true("temporal_var" %in% colnames(d_ar))
   expect_true(all(d_ar$temporal_var >= 0))
-  # param + residual + temporal should reconstruct total_var (within MC
-  # tolerance). env_var is excluded because it is an additive perturbation-
-  # based augmentation measured outside of posterior_predict.
-  recon <- d_ar$param_var + d_ar$residual_var + d_ar$temporal_var
-  expect_true(all(abs(recon - d_ar$total_var) < 0.05 * d_ar$total_var))
+  # total_var is DEFINED as the sum of every component, so param + env +
+  # residual + temporal reconstructs total_var EXACTLY (env now enters the
+  # total instead of being bolted on top).
+  recon <- d_ar$param_var + d_ar$env_var + d_ar$residual_var + d_ar$temporal_var
+  expect_equal(recon, d_ar$total_var, tolerance = 1e-10)
   # And the temporal gap should be substantial relative to residual_var alone.
   expect_true(mean(d_ar$temporal_var) > mean(d_ar$residual_var))
+})
+
+test_that("autocorrelation temporal_var is robust to a single explosive draw", {
+  # Regression guard for the near-unit-root pathology: when an AR posterior has
+  # a tiny fraction of |phi| >= 1 draws, the far-lead forecast variance is
+  # heavy-tailed and a raw var() would be dominated by one explosive draw while
+  # the quantile interval is unaffected. The decomposition now uses a winsorized
+  # (tail-robust) predictive variance so it stays consistent with that interval.
+  set.seed(202)
+  n_obs <- 4L; n_draws <- 500L
+  lp    <- matrix(rnorm(n_draws * n_obs, mean = 0.5, sd = 0.05), nrow = n_draws)
+  sigma_draws <- rep(0.3, n_draws)
+  # Well-behaved AR-style pp: linpred + a moderate innovation.
+  pp <- lp + matrix(rnorm(n_draws * n_obs, sd = 0.4), nrow = n_draws)
+  # Inject ONE explosive (near-non-stationary) draw in the last column.
+  pp_bad <- pp
+  pp_bad[1L, n_obs] <- pp_bad[1L, n_obs] + 60
+
+  gauss_family <- list(family = "gaussian", link = "identity",
+                       linkinv = identity)
+  disp_draws   <- list(sigma = sigma_draws, phi = NULL, shape = NULL, nu = NULL)
+
+  d_clean <- ErrorTracer:::.decompose_from_arrays(
+    pp = pp, mu_draws = lp, mu_perturbed = lp, mu_draws_sub = lp,
+    family = gauss_family, disp_draws = disp_draws, has_autocor = TRUE)
+  d_bad <- suppressWarnings(ErrorTracer:::.decompose_from_arrays(
+    pp = pp_bad, mu_draws = lp, mu_perturbed = lp, mu_draws_sub = lp,
+    family = gauss_family, disp_draws = disp_draws, has_autocor = TRUE))
+
+  # The one explosive draw must not blow up temporal_var: the robust estimate
+  # stays close to the clean one (a raw var() would be several times larger).
+  expect_lt(d_bad$temporal_var[n_obs], 2 * d_clean$temporal_var[n_obs])
+  # Budget still reconciles exactly.
+  recon <- d_bad$param_var + d_bad$env_var + d_bad$residual_var + d_bad$temporal_var
+  expect_equal(recon, d_bad$total_var, tolerance = 1e-10)
+})
+
+test_that("iid budget reconciles exactly: param + env + residual == total", {
+  # T1: total_var must CONTAIN env_var so the percentage shares sum to 100%.
+  set.seed(202)
+  n_obs <- 8; n_draws <- 400
+  lp   <- matrix(rnorm(n_draws * n_obs, mean = 0.5, sd = 0.25), nrow = n_draws)
+  # Perturbed mean has clearly larger spread → non-trivial env_var.
+  lp_p <- lp + matrix(rnorm(n_draws * n_obs, sd = 0.4), nrow = n_draws)
+  sigma_draws <- abs(rnorm(n_draws, mean = 0.6, sd = 0.05))
+  pp   <- lp + matrix(rnorm(n_draws * n_obs, sd = rep(sigma_draws, n_obs)),
+                      nrow = n_draws)
+
+  gauss_family <- list(family = "gaussian", link = "identity",
+                       linkinv = identity)
+  disp_draws   <- list(sigma = sigma_draws, phi = NULL, shape = NULL, nu = NULL)
+
+  d <- ErrorTracer:::.decompose_from_arrays(
+    pp = pp, mu_draws = lp, mu_perturbed = lp_p, mu_draws_sub = lp,
+    family = gauss_family, disp_draws = disp_draws, has_autocor = FALSE)
+
+  # env_var is genuinely non-zero here
+  expect_true(mean(d$env_var) > 0)
+  # Exact reconciliation → percentage shares sum to 100%
+  recon <- d$param_var + d$env_var + d$residual_var
+  expect_equal(recon, d$total_var, tolerance = 1e-10)
+  pct <- 100 * recon / d$total_var
+  expect_equal(pct, rep(100, n_obs), tolerance = 1e-8)
 })
 
 test_that(".formula_has_autocor detects ar()/ma()/arma() and rejects plain formulas", {

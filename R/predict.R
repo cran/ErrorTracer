@@ -104,6 +104,22 @@
 #'   Correlation (\code{env_cov}) is applied to the latent standard-normal
 #'   draws before the marginal quantile transform, so rank correlations are
 #'   preserved across distributions.
+#' @param env_ensemble Optional pathwise driver ensemble for forecasting under
+#'   uncertain future covariates.  A \strong{named list}, one entry per uncertain
+#'   driver predictor, where each entry is an \eqn{M \times H} matrix of
+#'   \eqn{M} scenario trajectories over the \eqn{H = \mathrm{nrow(newdata)}}
+#'   forecast steps (rows are scenarios, columns are horizon steps).  Unlike
+#'   \code{env_noise} --- which draws \emph{independent} per-observation jitter
+#'   that averages out and leaves the driver variance flat with lead time ---
+#'   each posterior draw here is paired with a whole \emph{trajectory}, so the
+#'   driver uncertainty is temporally coherent and \strong{accumulates with lead
+#'   time} as a real driver ensemble (e.g.\ CMIP members, or resampled
+#'   climatology) fans out.  Predictors absent from \code{env_ensemble} are held
+#'   at their \code{newdata} values.  When supplied, \code{env_ensemble}
+#'   supersedes \code{env_noise} for the perturbation and is folded into the
+#'   credible interval by default.  This is the recommended way to build a
+#'   genuine \emph{reforecast} in which only information available at the issue
+#'   date is used.
 #' @param n_draws Integer.  Number of posterior draws to use (default 2000;
 #'   capped at the number of draws available in the fit).
 #' @param ci_levels Numeric vector.  Credible interval levels to compute
@@ -135,18 +151,19 @@
 #'   The decomposition components and \code{posterior_predict} /
 #'   \code{posterior_linpred} matrices are always computed regardless of this
 #'   setting.
-#' @param include_env_in_ci Logical.  When \code{TRUE} and
-#'   \code{interval_type = "predictive"}, credible intervals are constructed
-#'   from \strong{environmentally inflated} draws
-#'   \eqn{\tilde y = \tilde{\mathrm{lp}} + \varepsilon}, with
-#'   \eqn{\tilde{\mathrm{lp}}} the perturbed linear predictor and
-#'   \eqn{\varepsilon \sim N(0, \sigma^2)} using posterior draws of
-#'   \eqn{\sigma}.  This folds the environmental uncertainty component back
-#'   into the CI, which is typically what you want for sensitivity analyses
-#'   or whenever the reported interval should cover predictor-measurement
-#'   error.  When \code{FALSE} (default, backward compatible), CIs are based
-#'   on \code{posterior_predict} only --- parameter + residual, without
-#'   predictor noise.
+#' @param include_env_in_ci Logical or \code{NULL}.  Controls whether
+#'   environmental (predictor) uncertainty is folded into the credible
+#'   interval when \code{interval_type = "predictive"}.  When \code{TRUE},
+#'   intervals are built from \strong{environmentally inflated} draws in which
+#'   each posterior-predictive residual is re-centred on the env-perturbed
+#'   response-scale mean, \eqn{\tilde y = \tilde\mu + (y^{pp} - \mu)}
+#'   (family-general; for Gaussian identity this equals
+#'   \eqn{\tilde{\mathrm{lp}} + \varepsilon}, \eqn{\varepsilon\sim N(0,\sigma^2)}).
+#'   The interval variance is then param + env + residual, coherent with the
+#'   env-inclusive \code{total_var}.  The default \code{NULL} means
+#'   \strong{auto}: env is folded in whenever the caller supplied non-zero
+#'   \code{env_noise}, and omitted otherwise.  Pass \code{FALSE} to force a
+#'   parameter + residual interval even when \code{env_noise} is given.
 #' @param ... Passed to methods.
 #'
 #' @return An \code{et_prediction} object (list) containing:
@@ -180,12 +197,12 @@
 #'   \code{\link{et_calibrate}}
 #' @export
 et_predict <- function(model, newdata, env_noise = NULL, env_cov = NULL,
-                        env_dist = NULL,
+                        env_dist = NULL, env_ensemble = NULL,
                         n_draws = 2000L, ci_levels = c(0.5, 0.8, 0.9, 0.95),
                         n_perturb = NULL,
                         n_env_draws = 1L,
                         interval_type = c("predictive", "linpred"),
-                        include_env_in_ci = FALSE, ...) {
+                        include_env_in_ci = NULL, ...) {
   UseMethod("et_predict")
 }
 
@@ -197,12 +214,13 @@ et_predict <- function(model, newdata, env_noise = NULL, env_cov = NULL,
 et_predict.et_model <- function(model, newdata, env_noise = NULL,
                                   env_cov = NULL,
                                   env_dist = NULL,
+                                  env_ensemble = NULL,
                                   n_draws = 2000L,
                                   ci_levels = c(0.5, 0.8, 0.9, 0.95),
                                   n_perturb = NULL,
                                   n_env_draws = 1L,
                                   interval_type = c("predictive", "linpred"),
-                                  include_env_in_ci = FALSE,
+                                  include_env_in_ci = NULL,
                                   ...) {
 
   interval_type <- match.arg(interval_type)
@@ -258,11 +276,43 @@ et_predict.et_model <- function(model, newdata, env_noise = NULL,
   # posterior_linpred(transform=TRUE) call and to stay backward-compatible.
   is_gauss_id <- .is_gaussian_identity(fit$family)
 
+  # Detect a residual autocorrelation structure once. When present, the
+  # posterior predictive must be generated by iterating the fitted process
+  # forward across the forecast horizon (see .posterior_predict_forecast),
+  # otherwise its variance does not accumulate with lead time.
+  has_autocor <- .formula_has_autocor(fit$formula)
+
+  # Cap the number of draws at what the fit actually holds, then use an
+  # explicit, shared set of draw ids so posterior_predict and
+  # posterior_linpred are aligned draw-for-draw (required for the residual
+  # telescoping in .inflate_env_predictive and to avoid brms's random
+  # sub-sampling returning mismatched draws across the two calls).
+  n_avail <- brms::ndraws(fit)
+  if (n_draws > n_avail) {
+    .et_warn("n_draws (", n_draws, ") exceeds the ", n_avail,
+             " draws in the fit; using ", n_avail, ".")
+    n_draws <- n_avail
+  }
+  # The perturbation subsample cannot exceed the (capped) number of draws,
+  # since mu_draws_sub indexes the first n_perturb rows of the draw matrices.
+  n_perturb <- min(n_perturb, n_draws)
+  draw_ids  <- seq_len(n_draws)
+
   # --- 1. Posterior predictive (full uncertainty, response scale) ---
-  pp <- brms::posterior_predict(fit, newdata = newdata, ndraws = n_draws)
+  # For autocorrelation models, iterate the process across the horizon by
+  # predicting on the training series continued with the forecast rows
+  # (response = NA); brms then accumulates the AR/MA variance with lead time
+  # and carries the initial-condition uncertainty from the forecast origin.
+  pp <- if (has_autocor) {
+    .posterior_predict_forecast(fit, model$data, newdata, draw_ids)
+  } else {
+    brms::posterior_predict(fit, newdata = newdata, draw_ids = draw_ids)
+  }
 
   # --- 2. Linear predictor draws (link scale, parameter uncertainty only) ---
-  lp <- brms::posterior_linpred(fit, newdata = newdata, ndraws = n_draws)
+  # The mean structure carries no autocorrelation (ar()/ma() act on the
+  # residual), so the linear predictor is computed directly on newdata.
+  lp <- brms::posterior_linpred(fit, newdata = newdata, draw_ids = draw_ids)
 
   # --- 3. Response-scale parameter draws ---
   # For Gaussian identity g^{-1}(eta) = eta, so mu_draws == lp — reuse it.
@@ -270,7 +320,7 @@ et_predict.et_model <- function(model, newdata, env_noise = NULL,
   mu_draws <- if (is_gauss_id) {
     lp
   } else {
-    brms::posterior_linpred(fit, newdata = newdata, ndraws = n_draws,
+    brms::posterior_linpred(fit, newdata = newdata, draw_ids = draw_ids,
                             transform = TRUE)
   }
 
@@ -289,7 +339,37 @@ et_predict.et_model <- function(model, newdata, env_noise = NULL,
   all_zero_noise <- all(vapply(noise_sds,
                                function(v) all(v == 0, na.rm = TRUE),
                                logical(1)))
-  lp_perturbed <- if (all_zero_noise) {
+
+  # Pathwise driver-ensemble mode (T2): when env_ensemble is supplied, each
+  # posterior draw is paired with a whole covariate TRAJECTORY, so driver
+  # uncertainty is temporally coherent and accumulates with lead time (unlike
+  # iid per-observation env_noise). It supersedes iid noise for the perturbation.
+  has_ensemble <- !is.null(env_ensemble)
+  if (has_ensemble) {
+    env_ensemble <- .validate_env_ensemble(env_ensemble, pred_names, newdata)
+  }
+
+  # There is environmental (driver) uncertainty if iid noise is non-zero OR a
+  # driver ensemble was supplied.
+  has_env_uncertainty <- (!all_zero_noise) || has_ensemble
+
+  # Resolve the auto (NULL) default for include_env_in_ci: fold environmental
+  # uncertainty into the interval whenever there is any. This keeps the reported
+  # forecast interval (and hence shelf life + calibration coverage) coherent
+  # with the env-inclusive total_var. Users can still override with TRUE/FALSE.
+  if (is.null(include_env_in_ci)) include_env_in_ci <- has_env_uncertainty
+
+  lp_perturbed <- if (has_ensemble) {
+    n_scen       <- nrow(env_ensemble[[1]])
+    scenario_ids <- rep_len(seq_len(n_scen), n_perturb)  # balanced, deterministic
+    .compute_lp_ensemble(
+      draws_mat    = draws_mat[seq_len(n_perturb), , drop = FALSE],
+      newdata      = newdata,
+      pred_names   = pred_names,
+      env_ensemble = env_ensemble,
+      scenario_ids = scenario_ids
+    )
+  } else if (all_zero_noise) {
     lp[seq_len(n_perturb), , drop = FALSE]
   } else {
     .compute_lp_perturbed(
@@ -314,21 +394,22 @@ et_predict.et_model <- function(model, newdata, env_noise = NULL,
   # --- 7. Credible intervals ---
   # Route to posterior_predict (includes sigma) or posterior_linpred (no sigma)
   # depending on interval_type. When include_env_in_ci = TRUE and interval_type
-  # is predictive, rebuild predictive draws as lp_perturbed + sigma * N(0,1)
-  # so predictor noise is folded back into the credible interval.
-  ci_draws <- if (interval_type == "predictive") {
-    if (isTRUE(include_env_in_ci) && !all_zero_noise) {
-      .inflate_env_predictive(lp_perturbed, sigma_draws)
-    } else {
-      pp
-    }
+  # is predictive, re-centre each posterior-predictive residual on the
+  # env-perturbed mean so predictor noise is folded into the interval
+  # (family-general; see .inflate_env_predictive).
+  # Full predictive draws implied by the reported forecast, with environmental
+  # (driver) uncertainty folded in when applicable. Single source of truth for
+  # the predictive interval AND for PIT / calibration, so all three agree.
+  predictive_draws <- if (isTRUE(include_env_in_ci) && has_env_uncertainty) {
+    .inflate_env_predictive(mu_perturbed, pp, mu_draws)
   } else {
-    lp
+    pp
   }
+  ci_draws <- if (interval_type == "predictive") predictive_draws else lp
   ci_df <- .compute_ci(ci_draws, ci_levels)
 
   # --- 8. Decomposition (all components on response scale) ---
-  has_autocor <- .formula_has_autocor(fit$formula)
+  # has_autocor was detected above (used to route the posterior predictive).
   decomp <- .decompose_from_arrays(
     pp           = pp,
     mu_draws     = mu_draws,
@@ -344,6 +425,7 @@ et_predict.et_model <- function(model, newdata, env_noise = NULL,
       posterior_predict  = pp,
       posterior_linpred  = lp,
       lp_perturbed       = lp_perturbed,
+      predictive_draws   = predictive_draws,
       sigma_draws        = sigma_draws,
       credible_intervals = ci_df,
       decomposition      = decomp,
@@ -352,6 +434,10 @@ et_predict.et_model <- function(model, newdata, env_noise = NULL,
       env_noise          = env_noise,
       env_cov            = cor_mat,
       env_dist           = dist_spec,
+      env_ensemble       = if (has_ensemble)
+                             list(n_scenarios = nrow(env_ensemble[[1]]),
+                                  drivers     = names(env_ensemble))
+                           else NULL,
       n_draws            = n_draws,
       interval_type      = interval_type,
       include_env_in_ci  = isTRUE(include_env_in_ci)
@@ -368,12 +454,13 @@ et_predict.et_model <- function(model, newdata, env_noise = NULL,
 et_predict.et_model_list <- function(model, newdata, env_noise = NULL,
                                       env_cov = NULL,
                                       env_dist = NULL,
+                                      env_ensemble = NULL,
                                       n_draws = 2000L,
                                       ci_levels = c(0.5, 0.8, 0.9, 0.95),
                                       n_perturb = NULL,
                                       n_env_draws = 1L,
                                       interval_type = c("predictive", "linpred"),
-                                      include_env_in_ci = FALSE,
+                                      include_env_in_ci = NULL,
                                       ...) {
   interval_type <- match.arg(interval_type)
 
@@ -405,6 +492,7 @@ et_predict.et_model_list <- function(model, newdata, env_noise = NULL,
         env_noise         = env_noise,
         env_cov           = env_cov,
         env_dist          = env_dist,
+        env_ensemble      = env_ensemble,
         n_draws           = n_draws,
         ci_levels         = ci_levels,
         n_perturb         = n_perturb,
@@ -544,15 +632,200 @@ et_predict.et_model_list <- function(model, newdata, env_noise = NULL,
   lp_mat
 }
 
-# Fold environmental noise into the predictive draws by adding fresh
-# residual noise on top of the perturbed linear predictor.
-.inflate_env_predictive <- function(lp_perturbed, sigma_draws) {
-  n_p  <- nrow(lp_perturbed)
-  n_o  <- ncol(lp_perturbed)
-  s    <- sigma_draws[seq_len(n_p)]
-  s[is.na(s)] <- 0
-  eps  <- matrix(stats::rnorm(n_p * n_o, sd = rep(s, n_o)), nrow = n_p)
-  lp_perturbed + eps
+# Validate and normalise a driver ensemble (T2). Returns a named list of
+# numeric [M x H] matrices (M scenarios x H = nrow(newdata) horizon steps),
+# restricted to predictors that are actually in the model.
+.validate_env_ensemble <- function(env_ensemble, pred_names, newdata) {
+  if (!is.list(env_ensemble) || is.null(names(env_ensemble)) ||
+      any(names(env_ensemble) == "")) {
+    stop("env_ensemble must be a NAMED list of [M x H] matrices, one per ",
+         "driver predictor (M scenarios by H = nrow(newdata) horizon steps).")
+  }
+  H <- nrow(newdata)
+
+  unknown <- setdiff(names(env_ensemble), pred_names)
+  if (length(unknown)) {
+    .et_warn("env_ensemble contains predictor(s) not in model: ",
+             paste(unknown, collapse = ", "), " -- ignored.")
+    env_ensemble <- env_ensemble[intersect(names(env_ensemble), pred_names)]
+  }
+  if (length(env_ensemble) == 0L) {
+    stop("env_ensemble has no drivers matching the model predictors.")
+  }
+
+  mats <- lapply(env_ensemble, function(e) {
+    m <- as.matrix(e)
+    storage.mode(m) <- "double"
+    m
+  })
+  Ms <- vapply(mats, nrow, integer(1))
+  Hs <- vapply(mats, ncol, integer(1))
+  if (any(Hs != H)) {
+    stop("each env_ensemble[[p]] must have ncol == nrow(newdata) (= ", H,
+         "); a driver had ", paste(unique(Hs), collapse = ", "), " columns. ",
+         "Rows are scenarios, columns are forecast/horizon steps.")
+  }
+  if (length(unique(Ms)) != 1L) {
+    stop("all env_ensemble drivers must share the same number of scenarios ",
+         "(rows); got ", paste(unique(Ms), collapse = ", "), ".")
+  }
+  if (unique(Ms) < 2L) {
+    stop("env_ensemble needs at least 2 scenarios to carry driver uncertainty.")
+  }
+  mats
+}
+
+# Pathwise driver-ensemble linear predictor (T2). Instead of iid per-observation
+# noise, each posterior draw is paired with a whole covariate TRAJECTORY drawn
+# from a user-supplied driver ensemble (e.g. CMIP members or resampled
+# climatology). Because a trajectory is temporally coherent -- a warm scenario
+# stays warm across the whole horizon -- and ensembles fan out with lead time,
+# the resulting driver variance ACCUMULATES with lead time, unlike iid jitter
+# (which averages out and stays flat). Non-ensemble predictors are held at their
+# newdata values.
+#
+# draws_mat    : [n_perturb x n_params] posterior draws (betas + intercept)
+# newdata      : [H x .] forecast rows; supplies the fixed predictors
+# pred_names   : model predictor names
+# env_ensemble : named list; env_ensemble[[p]] is an [M x H] matrix of scenario
+#                trajectories for driver predictor p
+# scenario_ids : integer vector length n_perturb, the scenario paired with each
+#                draw
+.compute_lp_ensemble <- function(draws_mat, newdata, pred_names,
+                                 env_ensemble, scenario_ids) {
+  n_perturb <- nrow(draws_mat)
+  H         <- nrow(newdata)
+
+  beta_cols   <- paste0("b_", pred_names)
+  avail_betas <- intersect(beta_cols, colnames(draws_mat))
+  avail_preds <- sub("^b_", "", avail_betas)
+  if (length(avail_betas) == 0L) {
+    .et_warn("No beta columns found in draws matrix -- returning zero LP.")
+    return(matrix(0, n_perturb, H))
+  }
+
+  int_vals <- if ("b_Intercept" %in% colnames(draws_mat)) {
+    draws_mat[, "b_Intercept"]
+  } else {
+    rep(0, n_perturb)
+  }
+
+  X_base <- as.matrix(newdata[, avail_preds, drop = FALSE])  # H x P
+  driver_names <- intersect(names(env_ensemble), avail_preds)
+
+  lp_mat <- matrix(NA_real_, n_perturb, H)
+  for (i in seq_len(n_perturb)) {
+    Xi <- X_base
+    m  <- scenario_ids[i]
+    for (p in driver_names) {
+      Xi[, p] <- env_ensemble[[p]][m, ]   # scenario m's trajectory for driver p
+    }
+    lp_mat[i, ] <- int_vals[i] + as.numeric(Xi %*% draws_mat[i, avail_betas])
+  }
+  lp_mat
+}
+
+# Forecast-aware posterior predictive for autocorrelation models
+# (ar()/ma()/arma()/cosy()/unstr()/sar()/car()). brms accumulates the residual
+# autocorrelation variance across a horizon only when the forecast rows
+# CONTINUE the training series; predicting on the forecast rows alone yields a
+# flat, non-accumulating predictive (the variance never grows with lead time).
+# We therefore append the forecast rows (response = NA) to the training data,
+# predict on the combined series, and return only the forecast columns. brms
+# then iterates the fitted process forward — integrating over the posterior of
+# the AR coefficient (so draws with |phi| >= 1 contribute super-linear growth)
+# and carrying the initial-condition uncertainty from the forecast origin.
+#
+# fit           : brmsfit
+# training_data : the data the model was fit on (model$data)
+# newdata       : forecast rows (predictors + the ar() time index; the response
+#                 column may be absent or NA)
+# draw_ids      : integer draw indices (aligned with the other draw matrices)
+.posterior_predict_forecast <- function(fit, training_data, newdata, draw_ids) {
+  resp <- tryCatch(all.vars(brms::brmsterms(fit$formula)$respform),
+                   error = function(e) NULL)
+  if (is.null(resp) || length(resp) == 0L) {
+    # Cannot identify the response: fall back to the plain (non-accumulating)
+    # call rather than fail. Variance growth with lead time will be lost.
+    .et_warn("Could not identify the response for an autocorrelation model; ",
+             "forecast variance may not accumulate with lead time.")
+    return(brms::posterior_predict(fit, newdata = newdata, draw_ids = draw_ids))
+  }
+
+  nd <- newdata
+  # ALWAYS blank the response on the forecast rows: they are forecasts, so
+  # their responses are unknown at the issue date. If newdata happens to carry
+  # observed values (e.g. a hindcast for validation), letting brms see them
+  # would condition on the future and yield smoothed, non-accumulating
+  # intervals instead of a genuine forecast.
+  for (r in resp) nd[[r]] <- NA
+  # Align to the training columns; fill any still-missing columns with NA so
+  # rbind() succeeds (a genuinely missing predictor surfaces downstream).
+  miss <- setdiff(names(training_data), names(nd))
+  for (m in miss) nd[[m]] <- NA
+  nd <- nd[, names(training_data), drop = FALSE]
+
+  combined <- rbind(training_data, nd)
+  n_new    <- nrow(newdata)
+  n_all    <- nrow(combined)
+
+  pp_all <- brms::posterior_predict(fit, newdata = combined, draw_ids = draw_ids)
+  pp_all[, (n_all - n_new + 1L):n_all, drop = FALSE]
+}
+
+# Fold environmental (predictor) uncertainty into the predictive draws by
+# re-centring each posterior-predictive residual on the env-perturbed mean.
+# Family-general: for draw s and observation i,
+#   y_env^(s) = mu_perturbed^(s) + (pp^(s) - mu^(s))
+# where (pp - mu) is the family residual implied by the UNPERTURBED posterior
+# predictive (pp) and its response-scale mean (mu = mu_draws). This works for
+# any brms family without a family-specific sampler: for Gaussian identity it
+# reduces to mu_perturbed + sigma * N(0,1). The result has variance
+# Var(mu_perturbed) + Var(residual) = param + env + residual, matching the
+# variance decomposition, so the interval and total_var tell a consistent
+# story. All arguments are on the RESPONSE scale.
+#
+# mu_perturbed : [n_perturb x n_obs] env-perturbed response-scale means
+# pp           : [n_draws  x n_obs] unperturbed posterior predictive draws
+# mu_draws     : [n_draws  x n_obs] unperturbed response-scale means
+.inflate_env_predictive <- function(mu_perturbed, pp, mu_draws) {
+  n_draws <- nrow(pp)
+  n_p     <- nrow(mu_perturbed)
+  # Recycle the env perturbation across ALL posterior draws so the returned
+  # predictive draws cover the same n_draws as pp (and hence the same draws the
+  # variance decomposition uses). Env perturbations are iid and exchangeable, so
+  # recycling the pattern is valid, and the first n_p rows are unchanged.
+  # Without this the interval / PIT / calibration would use only the first
+  # n_perturb draws while the decomposition uses all n_draws -- an inconsistency
+  # that is acute for autocorrelation forecasts whose far-lead draws are
+  # heavy-tailed (a few near-non-stationary draws dominate the full sample but
+  # not the truncated one).
+  idx   <- rep_len(seq_len(n_p), n_draws)
+  resid <- pp - mu_draws
+  mu_perturbed[idx, , drop = FALSE] + resid
+}
+
+# Tail-robust (winsorized) column variance. Each column is clipped to its
+# [trim, 1 - trim] quantiles before var() is taken, so a handful of extreme
+# draws cannot dominate the estimate. This matters for the posterior-predictive
+# variance of an autocorrelation forecast: when the AR coefficient's posterior
+# has mass at |phi| >= 1, the k-step-ahead forecast variance is heavy-tailed and
+# a single non-stationary draw can inflate the raw variance by an order of
+# magnitude, while the quantile-based credible interval (which the forecast
+# actually reports) is unaffected. Winsorizing yields a spread consistent with
+# that interval. The default trim = 0.01 clips the outer 1% of draws per side:
+# enough to remove the single-draw domination of a spurious near-non-stationary
+# tail (e.g. one |phi| >= 1 draw in a mostly-stationary posterior), while leaving
+# genuine non-stationary posterior mass visible (a species whose AR posterior is
+# truly explosive still gets a large temporal variance). For a well-behaved
+# column the winsorized variance is within ~5% of the raw variance.
+.robust_col_var <- function(mat, trim = 0.01) {
+  if (trim <= 0) return(apply(mat, 2, stats::var))
+  apply(mat, 2, function(col) {
+    qs <- stats::quantile(col, probs = c(trim, 1 - trim),
+                          names = FALSE, na.rm = TRUE)
+    stats::var(pmin(pmax(col, qs[1]), qs[2]))
+  })
 }
 
 # Build credible interval data.frame from posterior predictive matrix.
@@ -582,12 +855,16 @@ et_predict.et_model_list <- function(model, newdata, env_noise = NULL,
 }
 
 # Core uncertainty decomposition from arrays.
-# All components are computed on the RESPONSE SCALE (g^{-1}(eta)) so that
-# the law of total variance holds: V_total ~ V_param + V_resid (when
-# env_noise = 0), and the components are dimensionally consistent. When
-# has_autocor = TRUE a fourth temporal_var component absorbs the
-# autocorrelation-induced spread (V_total - (V_param + V_env + V_resid)),
-# clamped at 0 for Monte Carlo robustness.
+# All components are computed on the RESPONSE SCALE (g^{-1}(eta)) so that the
+# law of total variance holds and the components are dimensionally consistent.
+# total_var is DEFINED as the sum of its components, so the budget reconciles
+# exactly and the percentage shares sum to 100%:
+#   iid       : V_total = V_param + V_env + V_resid
+#   has_autocor: V_total = V_param + V_env + V_resid + V_temporal
+# V_env (perturbed predictors) and V_temporal (AR/MA/ARMA accumulation, the
+# excess of the sampled posterior-predictive variance over V_param + V_resid)
+# are therefore genuine sub-shares of a total that contains them, not
+# quantities bolted on top of an env-free total.
 #
 # pp           : [n_draws  x n_obs] posterior predictive draws (response scale)
 # mu_draws     : [n_draws  x n_obs] response-scale posterior means
@@ -608,18 +885,38 @@ et_predict.et_model_list <- function(model, newdata, env_noise = NULL,
   param_var <- apply(mu_draws, 2, stats::var)
 
   # Environmental variance: subtraction estimator on the response scale.
-  v_perturbed <- apply(mu_perturbed,   2, stats::var, na.rm = TRUE)
-  v_param_sub <- apply(mu_draws_sub,   2, stats::var)
+  # Both column variances must be computed the SAME way: stats::var() dispatches
+  # on na.rm to a different C code path in cov.c ("na.or.complete" vs
+  # "everything"), and those two paths are not guaranteed to be bit-identical on
+  # every platform (they are on x86_64, but not on aarch64). An asymmetric call
+  # would make the difference below nonzero in the last bits even when the two
+  # matrices are the same sample.
+  v_perturbed <- apply(mu_perturbed, 2, stats::var, na.rm = TRUE)
+  v_param_sub <- apply(mu_draws_sub, 2, stats::var, na.rm = TRUE)
   v_env_raw   <- v_perturbed - v_param_sub
-  env_var     <- pmax(v_env_raw, 0)
+
+  # When there is no environmental noise the two matrices are the same sample
+  # (all_zero_noise path), so v_env_raw is 0 in exact arithmetic. Floating-point
+  # summation is not bit-reproducible across platforms/BLAS, so test against a
+  # relative tolerance rather than == 0. The threshold (sqrt(machine epsilon),
+  # the all.equal() convention) is many orders of magnitude below anything the
+  # subtraction estimator could resolve: its own Monte Carlo error is
+  # O(var * sqrt(2 / n_p)), so an env share this small is numerically
+  # indistinguishable from zero and is reported as zero.
+  zero_tol <- sqrt(.Machine$double.eps) * pmax(v_perturbed, v_param_sub, 0)
+  is_zero  <- !is.na(v_env_raw) & abs(v_env_raw) <= zero_tol
+
+  env_var           <- pmax(v_env_raw, 0)
+  env_var[is_zero]  <- 0
 
   # Monte Carlo SE of env_var.
   # Uses the chi-squared approximation SE(Var) ~= Var * sqrt(2 / (n - 1)).
-  # When v_env_raw == 0 exactly the two matrices are from the same sample
-  # (all_zero_noise path); env_var = 0 by construction, so SE = 0.
+  # Exactly zero on the no-noise path (env_var = 0 by construction); still
+  # reported when v_env_raw is negative, since there the SE is what tells the
+  # user the estimate is Monte Carlo noise.
   f_se       <- sqrt(2 / max(n_p - 1, 1))
   v_env_mcse <- ifelse(
-    v_env_raw == 0,
+    is_zero,
     0,
     sqrt((v_perturbed * f_se)^2 + (v_param_sub * f_se)^2)
   )
@@ -630,10 +927,59 @@ et_predict.et_model_list <- function(model, newdata, env_noise = NULL,
   # spread is captured in temporal_var below.
   residual_var <- .family_residual_var(family, mu_draws, disp_draws)
 
-  # Total variance: from the posterior predictive (response scale, unchanged).
-  # brms's posterior_predict() forecasts iteratively under AR/MA/ARMA, so
-  # total_var already includes the autocorrelation contribution.
-  total_var <- apply(pp, 2, stats::var)
+  # Sampled posterior-predictive variance on the UNPERTURBED predictors, taken
+  # tail-robustly (winsorized). By the law of total variance this equals
+  # param_var + residual_var for iid models (up to Monte Carlo error) and
+  # additionally contains the AR/MA/ARMA accumulation for autocorrelation models
+  # (brms forecasts iteratively). It does NOT contain env_var, which arises only
+  # from perturbing the predictors. The winsorization matters only for the
+  # autocorrelation branch: a near-non-stationary AR posterior makes the far-lead
+  # forecast variance heavy-tailed, so a raw var() would be dominated by a few
+  # |phi| >= 1 draws and disagree with the quantile credible interval; the robust
+  # estimate stays consistent with the reported interval (see .robust_col_var).
+  pp_var_raw <- apply(pp, 2, stats::var)
+  pp_var     <- .robust_col_var(pp)
+
+  if (isTRUE(has_autocor)) {
+    # Temporal (autocorrelation-induced) variance: the excess of the (robust)
+    # posterior-predictive variance over the iid-equivalent (param + residual)
+    # sum. For Gaussian AR(p) this is the autocorrelated accumulation of
+    # innovations beyond a single sigma^2; for ARMA / MA / cosy() / sar() /
+    # car() it absorbs whatever residual dependence structure brms is
+    # modelling — the part the analytic single-innovation residual_var cannot.
+    # Clamped at 0 to absorb small Monte Carlo noise. env is excluded from
+    # this gap because pp uses unperturbed predictors (so env is not in pp_var
+    # and must not be double-subtracted); it re-enters total_var below.
+    temporal_var <- pmax(0, pp_var - (param_var + residual_var))
+    # Total variance now CONTAINS every component. env enters through the
+    # perturbed predictors, temporal through the AR accumulation. Defining
+    # total as the component sum makes the budget reconcile EXACTLY (law of
+    # total variance), so the reported percentage shares sum to 100%.
+    total_var <- param_var + env_var + residual_var + temporal_var
+    # Heads-up when the AR forecast variance is heavy-tailed (near / above the
+    # unit root): the raw predictive variance greatly exceeds its winsorized
+    # value, so the point forecast becomes uninformative faster than the robust
+    # interval suggests. The reported components use the robust estimate.
+    # Compare the mean raw vs mean robust predictive variance (mean, not max,
+    # so a single explosive draw in one row does not by itself trip the flag).
+    tail_ratio <- mean(pp_var_raw, na.rm = TRUE) /
+                  max(mean(pp_var, na.rm = TRUE), .Machine$double.eps)
+    if (is.finite(tail_ratio) && tail_ratio > 3) {
+      .et_warn("Autocorrelation forecast variance is heavy-tailed (raw / robust ",
+               "predictive variance up to ", round(tail_ratio, 1), "x): the AR ",
+               "coefficient's posterior has mass near or above the unit root, so ",
+               "a few non-stationary draws inflate the raw variance. Reported ",
+               "temporal_var / total_var use the tail-robust estimate, consistent ",
+               "with the quantile credible interval; treat long-lead point ",
+               "forecasts with caution and see et_diagnose().")
+    }
+  } else {
+    temporal_var <- NULL
+    # iid: total variance is the exact law-of-total-variance sum. Using the
+    # analytic sum (rather than the noisier sampled pp variance) guarantees
+    # param + env + residual == total exactly.
+    total_var <- param_var + env_var + residual_var
+  }
 
   out <- data.frame(
     obs_id       = seq_len(n_obs),
@@ -644,20 +990,7 @@ et_predict.et_model_list <- function(model, newdata, env_noise = NULL,
     residual_var = residual_var,
     stringsAsFactors = FALSE
   )
-
-  if (isTRUE(has_autocor)) {
-    # Temporal (autocorrelation-induced) variance: the gap between the
-    # posterior-predictive total and the iid-equivalent (param + residual)
-    # sum. For Gaussian AR(p) this corresponds to the autocorrelated
-    # accumulation of innovations beyond a single sigma^2; for ARMA /
-    # MA / cosy() / sar() / car() it absorbs whatever residual dependence
-    # structure brms is modelling. env_var is deliberately excluded
-    # because it is an *additive* perturbation-based augmentation
-    # measured outside of posterior_predict (see docs); subtracting it
-    # here would systematically zero out temporal_var. Clamped at 0 to
-    # absorb small Monte Carlo and posterior-mean approximation noise.
-    out$temporal_var <- pmax(0, total_var - (param_var + residual_var))
-  }
+  if (!is.null(temporal_var)) out$temporal_var <- temporal_var
 
   out
 }

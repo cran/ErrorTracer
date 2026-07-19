@@ -2,6 +2,8 @@
 
 ## Overview
 
+<img src="images/logo.png" align="right" height="200" alt="ErrorTracer logo" />
+
 **ErrorTracer** provides a complete pipeline for ecological and genomic forecasting with climate or environmental covariates. It bridges the gap between regularized regression and fully Bayesian workflows in three steps:
 
 1. **Extract informed priors** from a fitted regularized or standard model (`glmnet`, `lm`, `glm`, `ranger`) and carry those estimates forward as prior means into a Bayesian model — rather than discarding them.
