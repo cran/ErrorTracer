@@ -1,3 +1,106 @@
+# ErrorTracer 1.3.0
+
+Corrects the variance decomposition for models carrying a residual
+autocorrelation term. **Any analysis using `ar()` / `ma()` / `arma()` /
+`cosy()` / `unstr()` / `sar()` / `car()` must be re-run**; iid models are
+unaffected (all three changes below are no-ops without an autocorrelation
+term). Note that 1.2.1, currently under CRAN review, ships the defect.
+
+
+## Bug fixes — variance decomposition under autocorrelation
+
+* **`env_var` was silently destroyed for any model with an `ar()` / `ma()` /
+  `arma()` term.** Under brms's default `ar(cov = FALSE)` parameterisation the
+  autocorrelation term enters the **mean** (`mu[n] += ar * err[n-1]`), not only
+  the covariance. `decompose_uncertainty()` computed
+  `env_var = Var(mu_perturbed) - Var(mu_draws)` where `mu_perturbed` came from an
+  internal hand-rolled linear predictor (no AR term) while `mu_draws` came from
+  `posterior_linpred()` (AR term included). The difference was therefore
+  `V_env - V_AR`, which turns negative as the AR error grows and was then clamped
+  to zero by `pmax(., 0)`.
+
+  In a controlled test (AR(1), phi = 0.9, analytic `V_env = beta^2 * delta^2 =
+  0.152`) the reported `env_var` averaged **0.012 and was floored to exactly zero
+  at 13 of 15 lead times**; the iid control recovered 0.173 correctly. Both
+  `posterior_linpred()` calls now pass `incl_autocor = FALSE`, which returns the
+  pure regression linear predictor — verified bit-identical to the internal
+  predictor, so the AR term cancels exactly in the subtraction. `env_var` now
+  averages 0.145 with no floored rows.
+
+* **`param_var` no longer absorbs the autocorrelation error, and `temporal_var`
+  no longer collapses to zero.** The same contamination meant `param_var` grew
+  with lead time even on non-trending new data (0.154 -> 0.976 over 15 steps, an
+  8.9x overstatement of parameter uncertainty at the far lead), which in turn
+  made `temporal_var = pmax(0, pp_var - (param_var + residual_var))` evaluate to
+  **zero at every lead for a series with phi = 0.82**. After the fix `param_var`
+  is flat (0.154 -> 0.147) and `temporal_var` grows monotonically 0 -> 0.637,
+  correctly reporting zero at lead 1 where a single innovation adds nothing
+  beyond `residual_var`.
+
+  **This changes reported numbers for every autocorrelation model.** Analyses
+  using `ar()`/`ma()`/`arma()`/`cosy()`/`unstr()`/`sar()`/`car()` must be re-run.
+
+* **The `env_var` zero-floor is now instrumented.** `decompose_uncertainty()`
+  warns when the floor fires on rows whose shortfall exceeds twice its own Monte
+  Carlo SE — too systematic to be jitter. The silent floor is what hid the bug
+  above through two review rounds. The test is statistical rather than a raw
+  count, so small prediction sets (where a floored row genuinely is jitter) do
+  not trip it.
+
+## Autocorrelation priors — treating the cause rather than the tail
+
+* **`et_fit()` gains `ar_prior`, defaulting to `"weakly_informative"`.** `brms`
+  places a *flat, unbounded* prior on `class = "ar"` / `"ma"`
+  (`get_prior()` reports `(flat)` with no `lb`/`ub`), so nothing keeps the
+  residual process inside the stationary region. On the short series typical of
+  ecological panels the posterior routinely straddles the unit root, and the
+  k-step forecast variance `sigma^2 (1 - phi^(2k)) / (1 - phi^2)` then diverges.
+  The new default `normal(0, 0.5)` places ~95% of the prior mass inside
+  `(-1, 1)` without hard-bounding, so a genuinely non-stationary series can
+  still say so. `ar_prior = "stationary"` truncates to `(-1, 1)`;
+  `ar_prior = "flat"` restores the old behaviour. A prior the caller supplies
+  for these classes is never overridden.
+
+  On a near-unit-root fixture (n = 23, true random-walk residual) this reduces
+  the ratio of raw to 1%-winsorized predictive variance from **1072x to 1.7x**
+  — i.e. the heavy tail that motivated the winsorization below was largely an
+  artefact of the unbounded prior, not a property of the data.
+
+* **`et_fit()` warns when more than 5% of an autocorrelation posterior sits at
+  `|value| >= 1`**, reporting the exact fraction and posterior mean. For AR(1)
+  this is precisely the posterior probability of a non-stationary process. The
+  message directs the user to read long-lead intervals, `temporal_var` and
+  `shelf_life()` as "no usable horizon" rather than as calibrated numbers.
+
+## Variance-estimator consistency
+
+* **`et_predict()` gains `var_trim` (default `0`), replacing the always-on,
+  undocumented 1% winsorization.** Two problems are fixed:
+  1. The winsorization was applied to the posterior-predictive variance *only*,
+     while `param_var` and the environmental pair stayed raw. `temporal_var`
+     was therefore a difference between two different estimators, biased low by
+     whatever the winsorization removed (~3.6% for a Gaussian at `trim = 0.01`)
+     — which blinded it to genuine autocorrelation shares below that threshold.
+     `var_trim` is now applied uniformly to **every** channel.
+  2. Reporting a winsorized variance next to a raw quantile credible interval
+     meant the budget and the interval described *different distributions*. With
+     the `var_trim = 0` default they describe the same one.
+
+  The tail diagnostic is still computed (against a fixed 1% reference,
+  regardless of `var_trim`, since it is a statement about the model rather than
+  the estimator) and now recommends `ar_prior = "stationary"` instead of
+  implying that a robust summary makes a diverging forecast trustworthy.
+
+  **This changes reported variance components** wherever the old winsorization
+  was biting — i.e. any near-unit-root autocorrelation fit.
+
+* Regression tests added in `tests/testthat/test-decompose-autocor.R`, covering
+  `env_var` recovery under `ar()`, floor-rate, no decay with lead time, positive
+  `temporal_var`, flat `param_var`, and an iid control. Reproduction scripts in
+  `tests/manual/`. The previous suite missed all of this because its mock builds
+  `mu_perturbed` as `lp + noise`, i.e. it assumed the two arrays were already on
+  the same footing.
+
 # ErrorTracer 1.2.1
 
 * **Fix: platform-dependent `v_env_mcse` on aarch64 (macOS arm64).** This is
