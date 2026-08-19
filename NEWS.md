@@ -1,10 +1,107 @@
+# ErrorTracer 1.3.1
+
+Corrects `shelf_life()`, which could report a forecast horizon that rested on a
+single noisy period. **Any reported shelf life should be re-checked**; series
+whose CI-width / response-scale ratio degrades monotonically are unaffected.
+
+## Bug fixes
+
+* **`shelf_life()` reported the first threshold exceedance as the horizon.**
+  When the ratio hovers near `threshold` without trending, one period can
+  exceed it by chance, and that isolated excursion was promoted to a "shelf
+  life". Observed on a real series whose ratio sat at ~0.92 across a 16-period
+  window with a single excursion to 1.038: the reported horizon was not
+  reproducible across sampler settings, varying between "no crossing", a
+  projection far outside the window, and two different crossing periods, from
+  MCMC noise alone.
+
+  `shelf_life()` now requires the exceedance to **persist**. The new `min_run`
+  argument (default `2`) sets how many consecutive uninformative periods
+  constitute a crossing; `min_run = 1` restores the previous behaviour. A
+  crossing already in force at the first lead is still detected, and a dip
+  inside an otherwise degrading series no longer resets the horizon.
+
+* **The projection mode extrapolated slopes indistinguishable from flat.**
+  `min_slope_for_projection` is a magnitude gate only, so a slope of ~1e-3 with
+  a one-sided p-value of 0.42 cleared it and was extrapolated to a
+  confident-looking crossing time. On the same real series above this produced a
+  projected horizon 45 years out whose delta-method 95% interval spanned 328
+  years and **included the past**. The projection now additionally requires the
+  slope to be significantly positive, controlled by the new `projection_alpha`
+  argument (default `0.05`); when it is not, the result is reported as a lower
+  bound — the honest outcome for a forecast whose precision does not degrade
+  in-window. Set `projection_alpha = 1` to restore the previous behaviour.
+
+  The two fixes compose: a series that neither sustains a crossing nor trends
+  detectably now returns `lower_bound` instead of either a spurious observed
+  horizon or a spurious projection.
+
+* **`et_skill_score()` had the same first-crossing defect in its forecast
+  limit.** The null-relative forecast limit was the first lead time with
+  `skill <= 0`, with no persistence requirement. Skill hovering near zero
+  crosses by chance, so one unlucky lead was promoted to "the horizon" — found
+  on a real comparison whose mean skill over the window was comfortably
+  positive. `et_skill_score()` now takes `min_run` (default `2`, matching
+  `shelf_life()`) and the returned `"forecast_limit"` attribute carries
+  `n_below`, `first_below` and `min_run`, so isolated dips are visible rather
+  than load-bearing. `min_run = 1` restores the previous behaviour.
+
+## New features
+
+* **Group-level variance channel for hierarchical models.** The decomposition
+  now handles `(1 | g)`-style fits correctly, and distinguishes the two budgets
+  that a hierarchical model implies:
+
+  - Predicting for a group the fit has **seen**: the group effect is an
+    estimated parameter, its posterior uncertainty is part of `param_var`, and
+    there is no separate channel. Conditioning on a known group *reduces*
+    predictive variance relative to the population level, so the naive
+    `Var(full) - Var(population)` is negative and would be meaningless as a
+    "group variance" (measured on a 6-group fixture: 0.022 vs 0.244).
+  - Predicting for a **new** level: the budget integrates over the group-level
+    distribution and a `group_var` column appears, carrying the between-group
+    variance. Verified to recover the fitted `tau^2` on a known-truth fixture.
+
+  `et_predict()` detects new levels automatically and reports which budget it is
+  computing. `param_var + group_var + env_var + residual_var (+ temporal_var)`
+  still equals `total_var` exactly.
+
+* **`et_shelf_life_pool()` — pool shelf lives across forecast origins.** A
+  horizon from a single forecast origin is a property of that training window as
+  much as of the system. This pools horizons from repeated origins and returns a
+  median with an interval. Origins where the forecast was still informative when
+  the data ran out are **right-censored**, not missing: discarding them biases
+  the pooled horizon downward, because the censored origins are exactly the ones
+  with long horizons. Estimation is Kaplan–Meier via `survival` (a Recommended
+  package, in `Suggests`), with a documented, deliberately interval-free
+  fallback when it is unavailable. All origins censored is reported as a result
+  — the forecast never became uninformative — not as an estimation failure.
+
+* **`et_priors_split()` — remove the prior/likelihood double use entirely.**
+  `shrinkage = "zero"` already stopped reusing point estimates as prior means,
+  but the prior *scale*, and any variable *selection* performed by the
+  first-stage model, still came from the rows that form the likelihood. This
+  fits the first stage on a random (optionally stratified) subset and returns
+  the disjoint complement for the Bayesian fit, so selection and likelihood
+  share no observations and no post-selection caveat applies. The cost —
+  a smaller likelihood sample — is documented rather than hidden. The
+  user-supplied seed is restored afterwards so it cannot leak into the caller's
+  RNG stream.
+
+* **Exceedance diagnostics on every horizon.** The `horizon` attribute now
+  carries `n_exceedances`, `frac_exceedance`, `first_exceedance` and `min_run`
+  alongside `value` and `type`, so an isolated excursion is visible rather than
+  silent. Comparing `first_exceedance` with `value` shows directly whether a
+  horizon rests on a persistent crossing. Trend-mode horizons additionally carry
+  `slope` and `slope_p`.
+
 # ErrorTracer 1.3.0
 
 Corrects the variance decomposition for models carrying a residual
 autocorrelation term. **Any analysis using `ar()` / `ma()` / `arma()` /
 `cosy()` / `unstr()` / `sar()` / `car()` must be re-run**; iid models are
 unaffected (all three changes below are no-ops without an autocorrelation
-term). Note that 1.2.1, currently under CRAN review, ships the defect.
+term). Note that 1.2.1 ships the defect.
 
 
 ## Bug fixes — variance decomposition under autocorrelation
