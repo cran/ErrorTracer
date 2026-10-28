@@ -12,7 +12,7 @@
 
 <meta name="author" content="Luis Javier Madrigal-Roca, John Kelly" />
 
-<meta name="date" content="2026-10-24" />
+<meta name="date" content="2026-10-28" />
 
 <title>Getting Started with ErrorTracer</title>
 
@@ -343,7 +343,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 <h3 class="subtitle">Bayesian error propagation and forecast uncertainty
 decomposition</h3>
 <h4 class="author">Luis Javier Madrigal-Roca, John Kelly</h4>
-<h4 class="date">2026-10-24</h4>
+<h4 class="date">2026-10-28</h4>
 
 
 <div id="TOC">
@@ -928,9 +928,12 @@ of allele-frequency change.</p>
 residual autocorrelation term
 (e.g. <code>et_fit(y ~ x + ar(time = t, p = 1), ...)</code>),
 <code>decompose_uncertainty()</code> adds a fourth column
-<code>temporal_var</code> defined as
-<code>pmax(0, total_var − (param_var + env_var + residual_var))</code>.
-It captures the autocorrelation-induced spread that
+<code>temporal_var</code>, the remainder
+<code>total_var − (param_var + env_var + residual_var)</code>. Since
+1.4.0 it is <strong>signed</strong>: it is a covariance term, and a
+negative value is meaningful, since autocorrelated errors can reduce
+predictive variance relative to an independent-innovation baseline. It
+captures the autocorrelation-induced spread that
 <code>brms::posterior_predict()</code> accumulates iteratively beyond a
 single innovation, and <code>residual_var</code> is then interpretable
 as the <em>innovation</em> variance rather than the stationary marginal

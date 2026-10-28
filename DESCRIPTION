@@ -2,8 +2,8 @@ Package: ErrorTracer
 Type: Package
 Title: Bayesian Error Propagation and Forecast Uncertainty
         Decomposition
-Version: 1.4.0
-Date: 2026-10-23
+Version: 1.4.1
+Date: 2026-10-28
 Authors@R: c(
     person(given = "Luis Javier", family = "Madrigal-Roca", role = c("aut", "cre"), email = "madrigalrocalj@yahoo.com"),
     person(given = "John", family = "Kelly", role = "aut", email = "jkk@ku.edu")
@@ -36,9 +36,9 @@ Config/testthat/edition: 3
 VignetteBuilder: knitr
 Config/roxygen2/version: 8.1.0
 NeedsCompilation: no
-Packaged: 2026-10-24 17:23:39 UTC; madrigalrocalj
+Packaged: 2026-10-28 17:44:20 UTC; madrigalrocalj
 Author: Luis Javier Madrigal-Roca [aut, cre],
   John Kelly [aut]
 Maintainer: Luis Javier Madrigal-Roca <madrigalrocalj@yahoo.com>
 Repository: CRAN
-Date/Publication: 2026-10-24 17:40:02 UTC
+Date/Publication: 2026-10-28 20:00:30 UTC
