@@ -67,7 +67,6 @@ knitr::opts_chunk$set(
 #   newdata           = forecast_df,
 #   env_noise         = list(x = 0.3),
 #   n_draws           = 2000L,
-#   n_perturb         = 500L,
 #   ci_levels         = 0.90,
 #   include_env_in_ci = TRUE
 # )

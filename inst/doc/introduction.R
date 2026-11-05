@@ -22,60 +22,36 @@ knitr::opts_chunk$set(
 # ITER   <- 1000L
 # SEED   <- 42L
 
-## ----data-overview------------------------------------------------------------
-# str(et_sim, max.level = 2)
-# # List of 7
-# #  $ train         :'data.frame': 40 obs. of 6 variables:
-# #  $ forecast      :'data.frame': 10 obs. of 5 variables:
-# #  $ validation    :'data.frame': 10 obs. of 3 variables:
-# #  $ true_params   :List of 2
-# #  $ env_noise     :List of 3
-# #  $ standardization:List of 3
-# #  $ description   : chr ...
+## ----data-setup, include = FALSE, eval = TRUE---------------------------------
+library(ErrorTracer)
+data(et_sim)
 
-## ----head-train---------------------------------------------------------------
-# head(et_sim$train)
-# #   year cluster_id      Tmean        PPT        SWE     z_diff
-# # 1 1995          A -0.6775963  0.9119435 -0.1386249 -0.4917161
-# # 2 1996          A  0.4866542 -1.7284276 -1.4391959  0.4088745
-# # 3 1997          A -0.4935765 -0.3945083 -0.7267905  0.2352018
-# # 4 1998          A -0.2397691 -0.9805886 -0.8206722  0.3194194
-# # 5 1999          A -0.5193449  1.1304845  1.6453631 -0.2554886
-# # 6 2000          A -1.5333598  0.6437605  0.6252043 -0.5864645
+## ----data-overview, eval = TRUE-----------------------------------------------
+str(et_sim, max.level = 2)
 
-## ----true-params--------------------------------------------------------------
-# # True coefficients — known because the data are simulated
-# et_sim$true_params
-# # $A
-# #   intercept     Tmean       PPT       SWE     sigma
-# #        0.00      0.50     -0.30      0.20      0.40
-# #
-# # $B
-# #   intercept     Tmean       PPT       SWE     sigma
-# #        0.10      0.30     -0.20     -0.10      0.50
+## ----head-train, eval = TRUE--------------------------------------------------
+head(et_sim$train[, 1:6])
 
-## ----forecast-predictors------------------------------------------------------
-# # Forecast predictors are slightly above training range in Tmean (warming trend)
-# et_sim$forecast[et_sim$forecast$cluster_id == "A", ]
-# #   year cluster_id     Tmean       PPT        SWE
-# # 1 2015          A 0.6918714  0.291...  0.102...
-# # 2 2016          A 0.7012... ...
-# # ...
-# # Forecast Tmean is ~0.7-1.4 SDs above training mean — mild extrapolation.
+## ----true-params, eval = TRUE-------------------------------------------------
+# True coefficients — known because the data are simulated
+et_sim$true_params
 
-## ----plot-training-data-------------------------------------------------------
+## ----forecast-predictors, eval = TRUE-----------------------------------------
+# Forecast predictors sit above the training range in Tmean (warming trend)
+head(et_sim$forecast[et_sim$forecast$cluster_id == "A", 1:5])
+
+## ----plot-training-data, fig.cap="Simulated allele-frequency change over the training period."----
 # ggplot(et_sim$train, aes(x = year, y = z_diff, colour = cluster_id)) +
 #   geom_line() +
 #   geom_point(size = 2) +
 #   labs(
-#     title   = "Simulated allele-frequency change (training period)",
 #     x       = "Year",
 #     y       = expression(italic(z)[diff]),
 #     colour  = "Cluster"
 #   ) +
 #   et_theme()
 
-## ----plot-predictors----------------------------------------------------------
+## ----plot-predictors, fig.cap="Standardised climate predictors over the training and forecast periods."----
 # # Climate predictors over the full period — warming trend visible in Tmean
 # all_years <- rbind(
 #   transform(et_sim$train[et_sim$train$cluster_id == "A",
@@ -97,7 +73,6 @@ knitr::opts_chunk$set(
 #   geom_point(size = 1.8) +
 #   facet_wrap(~ predictor, ncol = 3) +
 #   labs(
-#     title  = "Climate predictors: training and forecast periods",
 #     x      = "Year", y = "Standardised value", colour = "Period"
 #   ) +
 #   et_theme()
@@ -119,14 +94,13 @@ knitr::opts_chunk$set(
 # coef(cv_fit_A, s = "lambda.min")
 # # 4 x 1 sparse Matrix of class "dgCMatrix"
 # #             lambda.min
-# # (Intercept)  0.0430
-# # Tmean        0.6658
-# # PPT         -0.4591
-# # SWE          0.3775
+# # (Intercept)  0.0453
+# # Tmean        0.4983
+# # PPT         -0.2722
+# # SWE          0.1683
 
-## ----enet-plot----------------------------------------------------------------
+## ----enet-plot, fig.cap="Cross-validated elastic net for cluster A."----------
 # plot(cv_fit_A)
-# title("Cross-validated elastic net — Cluster A", line = 2.5)
 
 ## ----extract-priors-----------------------------------------------------------
 # prior_spec_A <- extract_priors(
@@ -142,10 +116,11 @@ knitr::opts_chunk$set(
 # #   Predictors  : 3
 # #   Multiplier  : 2
 # #   Min SD      : 0.1
+# #   Shrinkage   : zero (prior means at 0; regularizing)
 # #   Coefficients:
-# #     Tmean                 mean =   0.6658  sd =   1.3316
-# #     PPT                   mean =  -0.4591  sd =   0.9182
-# #     SWE                   mean =   0.3775  sd =   0.7550
+# #     Tmean                 prior mean =   0.0000  sd =   0.9966  (coef =   0.4983)
+# #     PPT                   prior mean =   0.0000  sd =   0.5444  (coef =  -0.2722)
+# #     SWE                   prior mean =   0.0000  sd =   0.3365  (coef =   0.1683)
 
 ## ----et-fit-------------------------------------------------------------------
 # fit_A <- et_fit(
@@ -162,10 +137,10 @@ knitr::opts_chunk$set(
 # print(fit_A)
 # # ErrorTracer model (et_model)
 # #   Formula : z_diff ~ Tmean + PPT + SWE
-# #   n obs   : 20
-# #   Chains  : 2  Iter: 1000  Warmup: 500
+# #   n obs   : 100
+# #   Chains  : 2   Iter: 1000   Warmup: 500
 # #   Priors  : informed (glmnet, 3 predictors)
-# #   Rhat max: 1.004
+# #   Rhat max: 1.014
 
 ## ----et-summary---------------------------------------------------------------
 # summary(fit_A)
@@ -218,89 +193,71 @@ knitr::opts_chunk$set(
 # pred_A <- et_predict(
 #   model     = fit_A,
 #   newdata   = fcast_A,
-#   env_noise = et_sim$env_noise,   # list(Tmean = 0.30, PPT = 0.20, SWE = 0.15)
+#   env_noise = et_sim$env_noise,   # Tmean = 0.30, PPT = 0.20, SWE = 0.15, d1..d10 = 0
 #   n_draws   = 1000L,
-#   ci_levels = c(0.50, 0.80, 0.90, 0.95),
-#   n_perturb = 300L                # draws for the perturbation step
+#   ci_levels = c(0.50, 0.80, 0.90, 0.95)
 # )
 # 
 # print(pred_A)
 # # ErrorTracer prediction (et_prediction)
-# #   Observations : 5
-# #   Draws        : 1000
-# #   CI levels    : 0.5, 0.8, 0.9, 0.95
+# #   Observations  : 15
+# #   Draws         : 1000
+# #   CI levels     : 0.5, 0.8, 0.9, 0.95
+# #   Interval type : predictive
 # #   Mean var decomposition (across observations):
-# #     Parameter    : 0.0441
-# #     Environmental: 0.0579
-# #     Residual     : 0.2173
-# #     Total        : 0.2673
+# #     Parameter    : 0.0040
+# #     Environmental: 0.0264  (MC SE: 0.0014)
+# #     Residual     : 0.0870
+# #     Total        : 0.1174  (measured predictive variance)
+# #     Closure gap  : 0.0001  (Monte Carlo; compare MC SE above)
 
 ## ----ci-table-----------------------------------------------------------------
 # # 90% credible intervals by forecast year
 # ci90 <- pred_A$credible_intervals[pred_A$credible_intervals$ci_level == 0.90, ]
 # ci90$year <- fcast_A$year
-# ci90[, c("year", "lower", "median", "upper", "width")]
-# #   year    lower  median   upper  width
-# # 1 2015   -0.507   0.381   1.213  1.720
-# # 2 2016    0.009   0.794   1.660  1.651
-# # 3 2017   -0.009   0.875   1.631  1.640
-# # 4 2018   -0.179   0.649   1.460  1.639
-# # 5 2019   -0.767   0.131   1.002  1.769
+# head(ci90[, c("year", "lower", "median", "upper", "width")])
+# #    year      lower     median     upper    width
+# # 31 2020 -0.9124320 -0.3710932 0.2328418 1.145274
+# # 32 2021 -0.4276259  0.1268306 0.6656614 1.093287
+# # 33 2022 -0.7306874 -0.1616093 0.4136616 1.144349
+# # 34 2023 -0.2588986  0.2843572 0.8218421 1.080741
+# # 35 2024 -0.4706744  0.1134329 0.6489682 1.119643
+# # 36 2025 -0.3844870  0.1803172 0.7336616 1.118149
 
 ## ----decompose----------------------------------------------------------------
 # decomp_A <- decompose_uncertainty(pred_A)
-# decomp_A
-# #   obs_id total_var param_var  env_var residual_var
-# # 1      1    0.2627    0.0202   0.0541       0.2173
-# # 2      2    0.2667    0.0361   0.0588       0.2173
-# # 3      3    0.2573    0.0364   0.0541       0.2173
-# # 4      4    0.2529    0.0427   0.0653       0.2173
-# # 5      5    0.2972    0.0849   0.0574       0.2173
+# head(decomp_A)
+# #   obs_id total_var param_var env_var v_env_mcse residual_var closure_gap
+# # 1      1    0.1241    0.0061  0.0279     0.0054       0.0894      0.0007
+# # 2      2    0.1218    0.0049  0.0262     0.0053       0.0894      0.0013
+# # ...
 
-## ----plot-decomp--------------------------------------------------------------
-# et_plot_decomposition(decomp_A, proportional = TRUE) +
-#   labs(subtitle = "Cluster A, forecast 2015–2019")
+## ----plot-decomp, fig.cap="Variance decomposition for cluster A over the 2020-2034 forecast window."----
+# et_plot_decomposition(decomp_A, proportional = TRUE)
 
 ## ----shelf-life---------------------------------------------------------------
-# # Derive plausible range from training data (arcsin-sqrt scale — unbounded)
-# pr_A <- range(train_A$z_diff)   # e.g. c(-1.50, 2.04) => width ~ 3.54
+# # Derive response scale from training data (arcsin-sqrt scale — unbounded)
+# pr_A <- range(train_A$z_diff)   # c(-1.73, 1.57) => width ~ 3.30
 # 
 # sl_A <- shelf_life(
 #   predictions              = pred_A,
-#   plausible_range          = pr_A,
+#   response_scale           = pr_A,
 #   ci_level                 = 0.90,
-#   threshold                = 1.0,        # uninformative when CI width >= plausible range
+#   threshold                = 1.0,        # uninformative when CI width >= response scale
 #   time_col                 = "year",
-#   min_slope_for_projection = 1e-4,       # positive slope required to project
+#   min_run                  = 2L,         # require >= 2 consecutive exceedances
+#   projection_alpha         = 0.05,       # require significantly positive slope to project
+#   min_slope_for_projection = 1e-4,       # minimum slope magnitude to project
 #   max_extrapolation_factor = 10          # cap: project <= last_year + 10 * window_width
 # )
 # 
 # print(sl_A)
-# # ErrorTracer shelf life analysis
-# #   Observations     : 5
-# #   Plausible range  : 3.54
-# #   Threshold        : 1
-# #   Informative      : 5 / 5
-# #   Mean CI/range    : 0.488
-# #   Max CI/range     : 0.499
-# #   Shelf life       : > 2019 (lower bound — all periods informative, no trend)
-# #   Detail           : All 5 forecast periods informative. Linear trend
-# #                      (slope = 0.00241 per time unit) projects threshold
-# #                      crossing at ~2234.3, but this exceeds the extrapolation
-# #                      cap (2059). Shelf life > 2019.
 
 ## ----shelf-life-table---------------------------------------------------------
-# as.data.frame(sl_A)
-# #   obs_id  time ci_width plausible_range  ratio informative
-# # 1      1  2015    1.720            3.54  0.486        TRUE
-# # 2      2  2016    1.651            3.54  0.466        TRUE
-# # 3      3  2017    1.640            3.54  0.463        TRUE
-# # 4      4  2018    1.639            3.54  0.463        TRUE
-# # 5      5  2019    1.769            3.54  0.499        TRUE
+# head(as.data.frame(sl_A))
 
-## ----plot-shelf-life----------------------------------------------------------
-# et_plot_shelf_life(sl_A, show_ratio = TRUE) +
-#   labs(subtitle = "Cluster A — 90% CI width / training range (arcsin-sqrt scale)")
+## ----plot-shelf-life, fig.cap="Shelf life for cluster A: 90% CI width divided by the training range, on the arcsin-square-root scale."----
+# et_plot_shelf_life(sl_A, show_ratio = TRUE)
 
 ## ----calibrate----------------------------------------------------------------
 # valid_A <- et_sim$validation[et_sim$validation$cluster_id == "A", ]
@@ -319,26 +276,22 @@ knitr::opts_chunk$set(
 # # 3     0.90    0.90              1.00     5              0.10
 # # 4     0.95    0.95              1.00     5              0.05
 
-## ----plot-calibration---------------------------------------------------------
-# et_plot_calibration(cal_A) +
-#   labs(subtitle = "Cluster A — posterior predictive calibration")
+## ----plot-calibration, fig.cap="Posterior predictive calibration for cluster A."----
+# et_plot_calibration(cal_A)
 
-## ----plot-forecast------------------------------------------------------------
+## ----plot-forecast, fig.cap="Forecast for cluster A. Shaded ribbons are the 50, 80, 90 and 95% credible intervals."----
 # et_plot_forecast(
 #   predictions  = pred_A,
 #   observed     = valid_A,
 #   response_col = "z_diff",
 #   time_col     = "year"
-# ) +
-#   labs(subtitle = "Cluster A — shaded ribbons: 50%, 80%, 90%, 95% CI")
+# )
 
-## ----plot-prior-posterior-----------------------------------------------------
-# et_plot_prior_posterior(fit_A, max_preds = 3L) +
-#   labs(subtitle = "Cluster A — how 20 observations update the elastic-net prior")
+## ----plot-prior-posterior, fig.cap="How 20 observations update the elastic-net prior, cluster A."----
+# et_plot_prior_posterior(fit_A, max_preds = 3L)
 
-## ----plot-coefficients--------------------------------------------------------
-# et_plot_coefficients(fit_A) +
-#   labs(subtitle = "Cluster A — Bayesian 95% CI (blue) vs. enet coefficient (red ×)")
+## ----plot-coefficients, fig.cap="Bayesian 95% credible intervals (blue) against the elastic-net coefficients (red crosses), cluster A."----
+# et_plot_coefficients(fit_A)
 
 ## ----parameter-recovery-------------------------------------------------------
 # post    <- brms::fixef(fit_A$fit)
@@ -412,8 +365,7 @@ knitr::opts_chunk$set(
 #   newdata   = et_sim$forecast,
 #   env_noise = et_sim$env_noise,
 #   n_draws   = 1000L,
-#   ci_levels = c(0.50, 0.80, 0.90, 0.95),
-#   n_perturb = 300L
+#   ci_levels = c(0.50, 0.80, 0.90, 0.95)
 # )
 # 
 # print(pred_all)
@@ -424,20 +376,14 @@ knitr::opts_chunk$set(
 ## ----grouped-decompose--------------------------------------------------------
 # decomp_all <- decompose_uncertainty(pred_all)
 # head(decomp_all)
-# #   group obs_id total_var param_var  env_var residual_var
-# # 1     A      1    0.2627    0.0202   0.0541       0.2173
-# # 2     A      2    0.2667    0.0361   0.0588       0.2173
-# # ...
-# # 6     B      1    0.3374    0.0252   0.0122       0.2999
-# # 7     B      2    0.3472    0.0488   0.0180       0.2999
 
 ## ----grouped-shelf-life-------------------------------------------------------
 # # Use the pooled training range across both clusters (arcsin-sqrt scale)
-# pr_all <- range(et_sim$train$z_diff)   # e.g. c(-1.67, 2.04) => width ~ 3.71
+# pr_all <- range(et_sim$train$z_diff)   # c(-1.73, 1.57) => width ~ 3.30
 # 
 # sl_all <- shelf_life(
 #   pred_all,
-#   plausible_range          = pr_all,
+#   response_scale           = pr_all,
 #   ci_level                 = 0.90,
 #   threshold                = 1.0,
 #   time_col                 = "year",
@@ -445,21 +391,14 @@ knitr::opts_chunk$set(
 # )
 # 
 # print(sl_all)
-# # ErrorTracer shelf life analysis
-# #   Observations     : 10
-# #   Plausible range  : 3.71
-# #   Threshold        : 1
-# #   [A]  100.0% informative  mean ratio = 0.465  shelf life > 2019 (lower bound)
-# #   [B]  100.0% informative  mean ratio = 0.544  shelf life > 2019 (lower bound)
 
-## ----plot-grouped-shelf-life--------------------------------------------------
+## ----plot-grouped-shelf-life, fig.cap="Shelf life for both clusters: 90% CI width divided by the plausible range."----
 # et_plot_shelf_life(sl_all, show_ratio = TRUE) +
 #   labs(
-#     subtitle = "Both clusters — 90% CI width / plausible range",
 #     colour   = "Cluster"
 #   )
 
-## ----grouped-calibrate--------------------------------------------------------
+## ----grouped-calibrate, fig.cap="Posterior predictive calibration for both clusters."----
 # cal_all <- et_calibrate(
 #   pred_all,
 #   observed     = et_sim$validation,
@@ -467,13 +406,11 @@ knitr::opts_chunk$set(
 #   ci_levels    = c(0.50, 0.80, 0.90, 0.95)
 # )
 # 
-# et_plot_calibration(cal_all) +
-#   labs(subtitle = "Both clusters — posterior predictive calibration")
+# et_plot_calibration(cal_all)
 
-## ----grouped-coef-plot--------------------------------------------------------
+## ----grouped-coef-plot, fig.cap="Bayesian 95% credible intervals (blue) against the elastic-net coefficients (red crosses), both clusters."----
 # # Forest plot for all groups in a single faceted figure
-# et_plot_coefficients(fit_all) +
-#   labs(subtitle = "Bayesian 95% CI (blue) vs. enet coefficient (red ×)")
+# et_plot_coefficients(fit_all)
 
 ## ----gcm-workflow, eval = FALSE-----------------------------------------------
 # # Suppose you have GCM ensemble-mean predictors for 2025-2075,
@@ -511,7 +448,7 @@ knitr::opts_chunk$set(
 # # Shelf life over the 50-year horizon
 # sl_gcm <- shelf_life(
 #   pred_gcm,
-#   plausible_range          = range(train_A$z_diff),
+#   response_scale           = range(train_A$z_diff),
 #   time_col                 = "year",
 #   max_extrapolation_factor = Inf    # allow projection beyond the 50-yr window
 # )
@@ -545,31 +482,32 @@ knitr::opts_chunk$set(
 # #   Predictors  : 3
 # #   Multiplier  : 2
 # #   Min SD      : 0.1
+# #   Shrinkage   : zero (prior means at 0; regularizing)
 # #   Coefficients:
-# #     Tmean                 mean =   0.6669  sd =   1.3338
-# #     PPT                   mean =  -0.4677  sd =   0.9354
-# #     SWE                   mean =   0.3859  sd =   0.7719
+# #     Tmean                 prior mean =   0.0000  sd =   1.0023  (coef =   0.5012)
+# #     PPT                   prior mean =   0.0000  sd =   0.5490  (coef =  -0.2745)
+# #     SWE                   prior mean =   0.0000  sd =   0.3416  (coef =   0.1708)
 
 ## ----back-transform-----------------------------------------------------------
 # # Standardisation constants used when generating et_sim
 # et_sim$standardization
 # # $Tmean
 # #      mean        sd
-# # 15.5422  0.6797
+# #  15.74798   1.24258
 # #
 # # $PPT
 # #      mean        sd
-# # 110.5460  14.6855
+# # 108.60625  15.94841
 # #
 # # $SWE
 # #      mean        sd
-# # 86.9190  15.1885
+# #  61.23573  20.64495
 # 
 # # A Tmean of +1 SD corresponds to:
 # unstandardize(z = 1.0,
 #               mu = et_sim$standardization$Tmean["mean"],
 #               s  = et_sim$standardization$Tmean["sd"])
-# # [1] 16.22   ← 1 SD above training mean = 16.2 °C
+# # [1] 16.99   ← 1 SD above training mean = 17.0 °C
 
 ## ----session-info, eval = TRUE, echo = FALSE----------------------------------
 sessionInfo()

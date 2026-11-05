@@ -1,3 +1,77 @@
+# ErrorTracer 1.4.2
+
+Lets a model fitted outside the package enter the pipeline. Stages 1 and 2 are
+now optional in fact as well as in principle: prior extraction is a convenience
+for workflows that begin with a penalized fit, not a precondition for the
+variance accounting that follows it.
+
+## New features
+
+* **`as_et_model()` wraps an existing `brms` fit** in the `et_model` structure
+  `et_fit()` returns, so a model fitted by hand, by a colleague, or in an
+  earlier script runs through `et_predict()`, `decompose_uncertainty()`,
+  `shelf_life()` and the calibration diagnostics without being refitted. The
+  formula, family, training data and sampling seed are all recovered from the
+  fit, so a prediction from a wrapped model reproduces in the same way one from
+  `et_fit()` does.
+* **`et_predict()` and `et_diagnose()` accept a `brmsfit` directly** and call
+  `as_et_model()` themselves. Both previously raised "no applicable method":
+  the generics dispatched on `et_model` and `et_model_list` only.
+* **A bare `stanfit`, `stanmodel` or `CmdStanMCMC` is refused with the route to
+  take instead.** Posterior draws alone do not record which parameters are
+  coefficients, what the link function is, or which rows a forecast continues,
+  so the error points at `brms::brm(empty = TRUE)`, which builds the
+  scaffolding around a formula, family and data set that external draws can be
+  attached to.
+
+## Bug fixes
+
+* **`et_plot_decomposition(proportional = TRUE)` did not produce shares.**
+  Each component was divided by `total_var`, but the components drawn are only
+  the named channels, so the bars summed to `1 - closure_gap/total_var` for an
+  iid model rather than to 1. On real forecasts that left bars anywhere from
+  0.88 to 1.18 on an axis labelled "Share of predictive variance", with nothing
+  in the figure to say what was missing. Components are now normalised by the
+  channels actually drawn, so every bar sums to exactly 1, and the y axis is
+  formatted as a percentage. For an autocorrelation model the denominator is
+  unchanged, since `temporal_var` is the remainder against `total_var`. The iid
+  `closure_gap` is deliberately not drawn as a segment: it is a diagnostic, not
+  a source of variance. It remains in the decomposition and in `print()`, and a
+  material one now raises an informational message naming its mean and maximum.
+
+* **Long group labels collided on the x axis.** Tick angling keyed on the x
+  variable being `obs_id`, so a grouped plot kept horizontal labels however
+  long the group names were; twenty SNP identifiers overprinted into an
+  unreadable band. Angling is now decided from the labels themselves.
+
+* **Plots no longer carry a built-in title.** Every `et_plot_*()` function set
+  a default `title` in `labs()`. For a package whose figures are made to go
+  into manuscripts that is the one piece that is always wrong: a
+  journal typesets the caption itself, so a title baked into the image
+  duplicates it, cannot be copy-edited, and can end up contradicting it. It
+  also put the burden on the user to know the title was there and to remove it.
+  Axis labels, legend titles and facet strip labels are unchanged, and a title
+  remains one composition away for interactive use,
+  `et_plot_pit(pit) + ggplot2::labs(title = "...")`.
+
+* **`et_plot_pit()` drew one pooled reference line across panels of different
+  sizes.** The dashed uniform line and the shaded 95% band were computed from
+  `mean(n_per)/bins` and then drawn identically in every facet, so a panel
+  holding more observations than its neighbours got a line far below where its
+  bars must average. In this package's own case studies a 35-year forecast
+  window faceted beside six windows of 15 or 16 had its line at 2.3 instead of
+  4.4 and its band at [0, 5.1] instead of [0.5, 8.2]: every bar towered over
+  the line and three of eight broke the band, reading as gross miscalibration
+  for a series that does not reject uniformity. A histogram's bars cannot all
+  clear their own reference, since they average to `n/bins` by construction.
+  Each panel now gets its own line and band.
+
+* **`%||%` was used but never defined or imported.** `R/fit.R` and
+  `R/predict.R` call it, and it resolved only on R >= 4.4.0, where base R
+  supplies it; on the R (>= 4.1.0) that `DESCRIPTION` declares those calls
+  would have failed with "could not find function". It is now defined in
+  `R/utils.R`.
+
 # ErrorTracer 1.4.1
 
 Corrects plotting functions and axis for the predictive variance shares, and

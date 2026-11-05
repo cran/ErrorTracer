@@ -7,19 +7,30 @@
 #' Plot uncertainty decomposition
 #'
 #' Produces a stacked bar chart showing the relative contributions of
-#' parameter, environmental, and residual variance for each observation,
-#' plus a fourth temporal-autocorrelation component when present in
-#' \code{decomp} (see \code{\link{decompose_uncertainty}}).
+#' parameter, environmental, and residual variance for each observation, plus
+#' a temporal-autocorrelation component and a group component when those are
+#' present in \code{decomp} (see \code{\link{decompose_uncertainty}}).  The
+#' iid \code{closure_gap} is deliberately \emph{not} drawn: it is a
+#' diagnostic rather than a source of variance, and a grey remainder bar makes
+#' the figure harder to read for no interpretive gain.
 #'
 #' @param decomp A \code{data.frame} from \code{\link{decompose_uncertainty}}
 #'   or directly the \code{$decomposition} slot of an \code{et_prediction}.
 #' @param proportional Logical.  If \code{TRUE} (default), each component is
-#'   shown as a share of \code{total_var} (the measured predictive variance).
-#'   Shares therefore sum to 1 exactly for autocorrelation models and to within
-#'   Monte Carlo error for iid ones, where the shortfall is the
-#'   \code{closure_gap} column.  If \code{FALSE}, raw variances are shown.
-#'   Because \code{temporal_var} is signed, a negative component is drawn below
-#'   the zero line rather than silently clamped.
+#'   shown as a share of the channels drawn, so every bar sums to exactly 1
+#'   and the y axis is a true proportion (labelled as a percentage).  For an
+#'   autocorrelation model that denominator \emph{is} \code{total_var},
+#'   because \code{temporal_var} is the remainder against it.  For an iid
+#'   model the named channels fall short of \code{total_var} by
+#'   \code{closure_gap}, so the bars are shares of the decomposed variance
+#'   rather than of the measured total; the gap is reported in the
+#'   decomposition and by \code{print()}, and a material one raises an
+#'   informational message naming its mean and maximum.  Normalising by
+#'   \code{total_var} instead would leave iid bars visibly short of 1 on an
+#'   axis labelled "share", which reads as a plotting fault.  If
+#'   \code{FALSE}, raw variances are shown.  \code{temporal_var} is signed,
+#'   so a negative component is drawn below the zero line rather than silently
+#'   clamped.
 #' @param group_col Character.  Optional name of a grouping column in
 #'   \code{decomp} (present for grouped predictions).  One bar is drawn per
 #'   group: the components are summed over the group's observations and
@@ -58,25 +69,53 @@ et_plot_decomposition <- function(decomp, proportional = TRUE,
     decomp           <- agg
   }
 
-  # Normalise against the MEASURED total rather than against the component sum.
-  # position = "fill" would divide by the sum of the plotted components, which
-  # (a) hides the iid closure gap by rescaling it away and (b) is meaningless
-  # once a component can be negative. Dividing by total_var keeps the y axis
-  # interpretable as "share of predictive variance" in every case.
-  if (proportional && "total_var" %in% colnames(decomp)) {
-    denom <- decomp[["total_var"]]
+  # Normalise against the sum of the channels actually drawn, so the bars are
+  # true proportions and reach exactly 1. Dividing by total_var instead leaves
+  # iid bars short by the closure gap (up to ~13% on real forecasts), which
+  # reads as a plotting error on an axis labelled "share". For an
+  # autocorrelation model the two denominators are identical, because
+  # temporal_var is defined as the remainder against total_var.
+  #
+  # The gap is not swept under the rug, it is just not a bar: it stays in the
+  # decomposition as closure_gap, print()/summary() report it, and a material
+  # one is flagged below. That keeps the figure readable and the accounting
+  # auditable, which are different jobs.
+  gap_note <- NULL
+  if (proportional) {
+    denom <- rowSums(as.data.frame(decomp[components]), na.rm = TRUE)
+    if ("total_var" %in% colnames(decomp)) {
+      tv <- decomp[["total_var"]]
+      ok <- is.finite(tv) & tv > 0
+      if (any(ok)) {
+        gap <- (tv[ok] - denom[ok]) / tv[ok]
+        if (abs(mean(gap)) > 0.01 || max(abs(gap)) > 0.05) {
+          gap_note <- sprintf(
+            paste0("The drawn channels do not account for the measured ",
+                   "total_var: mean %+.1f%%, max |%.1f%%|. Bars are shares of ",
+                   "the channels shown, not of total_var. Inspect closure_gap ",
+                   "in the decomposition; a non-zero MEAN means a channel is ",
+                   "mis-estimated, while scatter around zero is Monte Carlo ",
+                   "error."),
+            100 * mean(gap), 100 * max(abs(gap)))
+        }
+      }
+    }
     denom[!is.finite(denom) | denom <= 0] <- NA_real_
     for (cc in components) decomp[[cc]] <- decomp[[cc]] / denom
   }
+  if (!is.null(gap_note)) .et_info(gap_note)
 
   long <- .pivot_decomp(decomp, components)
 
   has_negative <- any(long[["value"]] < 0, na.rm = TRUE)
   if (has_negative) {
-    .et_info("A variance component is negative (temporal_var is a signed ",
-             "covariance term); it is drawn below the zero line. A negative ",
-             "temporal_var of the same order as v_env_mcse is Monte Carlo ",
-             "noise rather than a real reduction in predictive variance.")
+    .et_info("A variance component is negative and is drawn below the zero ",
+             "line: temporal_var is a signed covariance term, and closure_gap ",
+             "is a signed remainder that goes negative whenever the named ",
+             "channels over-explain the measured total. Either one at the ",
+             "scale of ordinary Monte Carlo error on a variance (a few per ",
+             "cent of total_var) is noise, not a real reduction in ",
+             "predictive variance.")
   }
 
   x_col <- if (!is.null(group_col) && group_col %in% colnames(decomp)) {
@@ -101,15 +140,23 @@ et_plot_decomposition <- function(decomp, proportional = TRUE,
     ggplot2::geom_col(position = "stack") +
     ggplot2::scale_fill_manual(values = fill_values, name = "Component") +
     ggplot2::labs(
-      title = "Uncertainty Decomposition",
       x     = if (x_col == "obs_id") "Observation" else x_col,
       y     = if (proportional) "Share of predictive variance" else "Variance"
     ) +
     et_theme()
 
-  # Angled ticks earn their place for a long run of observation ids; for a
-  # handful of group names they are just harder to read.
-  if (x_col == "obs_id") {
+  if (proportional) {
+    p <- p + ggplot2::scale_y_continuous(labels = scales_percent_safe)
+  }
+
+  # Angle the ticks when the labels would otherwise collide. The old rule keyed
+  # on x_col == "obs_id", which left grouped plots horizontal however long the
+  # group names were -- twenty SNP ids on one axis overprinted into an
+  # unreadable band. Decide on the labels themselves instead.
+  x_labs  <- as.character(unique(long[[x_col]]))
+  crowded <- length(x_labs) > 8L ||
+             (length(x_labs) > 3L && max(nchar(x_labs), 0L) > 6L)
+  if (crowded) {
     p <- p + ggplot2::theme(
       axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
   }
@@ -231,7 +278,6 @@ et_plot_shelf_life <- function(sl, show_ratio = TRUE, max_ratio = NULL) {
     ggplot2::geom_point(size = 2.5) +
     ggplot2::geom_hline(yintercept = hline, linetype = "dashed", color = "grey40") +
     ggplot2::labs(
-      title = "Forecast Shelf Life",
       x     = "Time",
       y     = y_lab,
       color = if (has_group) "Group" else NULL
@@ -314,7 +360,6 @@ et_plot_calibration <- function(cal, group_col = NULL) {
     ggplot2::geom_abline(slope = 1, intercept = 0,
                          linetype = "dashed", color = "grey50") +
     ggplot2::labs(
-      title = "Calibration: Observed vs Nominal Coverage",
       x     = "Nominal CI level",
       y     = "Observed coverage"
     ) +
@@ -382,7 +427,6 @@ et_plot_forecast <- function(predictions, observed = NULL,
     ) +
     ggplot2::scale_alpha_continuous(range = c(0.12, 0.45), guide = "none") +
     ggplot2::labs(
-      title = "Forecast Fan Chart",
       x     = if (!is.null(time_col)) time_col else "Observation",
       y     = "Response"
     ) +
@@ -419,7 +463,9 @@ et_plot_forecast <- function(predictions, observed = NULL,
 #' Overlays prior and posterior density for each predictor coefficient,
 #' visualising how much the data update the priors.
 #'
-#' @param model An \code{et_model} object.
+#' @param model An \code{et_model} object with a non-\code{NULL}
+#'   \code{prior_spec} (from \code{\link{et_fit}} or
+#'   \code{\link{as_et_model}}).
 #' @param max_preds Integer.  Maximum number of predictors to show
 #'   (default 8).  Predictors are shown in the order they appear in the
 #'   prior specification.
@@ -483,7 +529,6 @@ et_plot_prior_posterior <- function(model, max_preds = 8L,
     ) +
     ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "grey30") +
     ggplot2::labs(
-      title = "Prior vs Posterior: Regression Coefficients",
       x     = "Value",
       y     = "Density"
     ) +
@@ -496,8 +541,9 @@ et_plot_prior_posterior <- function(model, max_preds = 8L,
 
 #' Forest plot of regression coefficients
 #'
-#' Compares Bayesian posterior estimates (95\% CI) with the regularized
-#' coefficient values used as prior means (shown as crosses).
+#' Compares Bayesian posterior estimates (95\% CI) with the regularized or
+#' first-stage coefficient estimates stored in the prior specification (shown
+#' as crosses).
 #'
 #' @param model An \code{et_model} or \code{et_model_list}.
 #' @return A \code{ggplot2} object.
@@ -564,7 +610,6 @@ et_plot_coefficients.et_model_list <- function(model) {
     ) +
     ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
     ggplot2::labs(
-      title = "Coefficient Estimates: Posterior (blue) vs Regularized (red \u00d7)",
       x     = "Coefficient",
       y     = NULL
     ) +
@@ -637,8 +682,7 @@ et_plot_sensitivity <- function(sens, show = c("horizon", "env_share", "ratio"))
         values = c("observed" = 16, "projected" = 21, "lower bound" = 2),
         drop = FALSE, name = "Horizon type"
       ) +
-      ggplot2::labs(x = x_lab, y = "Forecast horizon",
-                    title = "Shelf life vs. assumed measurement noise")
+      ggplot2::labs(x = x_lab, y = "Forecast horizon")
   } else if (show == "env_share") {
     p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[["x"]],
                                           y = .data[["env_share"]])) +
@@ -647,8 +691,7 @@ et_plot_sensitivity <- function(sens, show = c("horizon", "env_share", "ratio"))
       ggplot2::scale_y_continuous(labels = scales_percent_safe,
                                   limits = c(0, NA)) +
       ggplot2::labs(x = x_lab,
-                    y = "Environmental share of total variance",
-                    title = "How much of the forecast variance is environmental?")
+                    y = "Environmental share of total variance")
   } else {
     thr <- attr(sens, "threshold")
     p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[["x"]],
@@ -658,8 +701,7 @@ et_plot_sensitivity <- function(sens, show = c("horizon", "env_share", "ratio"))
       ggplot2::geom_hline(yintercept = if (is.null(thr)) 1 else thr,
                           linetype = "dashed") +
       ggplot2::labs(x = x_lab,
-                    y = "Mean CI width / plausible range",
-                    title = "Forecast informativeness vs. noise")
+                    y = "Mean CI width / plausible range")
   }
 
   p + et_theme()
@@ -672,7 +714,10 @@ et_plot_sensitivity <- function(sens, show = c("horizon", "env_share", "ratio"))
 #' indicate calibration; a \strong{U-shape} means overconfident (too-narrow)
 #' intervals, a central \strong{hump} means underconfident (too-wide), and a
 #' \strong{tilt} means bias.  The shaded band is an approximate 95\% consistency
-#' region for the bar heights under uniformity.
+#' region for the bar heights under uniformity.  When \code{pit} carries a
+#' \code{group} column the reference line and band are computed separately for
+#' each panel, so panels holding different numbers of observations remain
+#' comparable.
 #'
 #' @param pit A \code{data.frame} from \code{\link{et_pit}} (a \code{pit} column,
 #'   optionally \code{group}), or a bare numeric vector of PIT values.
@@ -690,22 +735,41 @@ et_plot_pit <- function(pit, bins = 10L) {
   has_group <- "group" %in% colnames(df)
   breaks    <- seq(0, 1, length.out = bins + 1L)
 
-  # Expected bar height and an approximate 95% band under uniformity.
-  n_per    <- if (has_group) as.numeric(tapply(!is.na(df$pit), df$group, sum))
-              else sum(!is.na(df$pit))
-  expected <- mean(n_per) / bins
-  band     <- 1.96 * sqrt(expected * (1 - 1 / bins))
+  # Expected bar height and an approximate 95% band under uniformity, one per
+  # panel. Groups routinely differ in size -- a 35-year forecast window beside
+  # a 16-year one -- and a single pooled reference lands below the large
+  # panel's bars and above the small panels', so a panel whose every bar
+  # clears the line reads as grossly miscalibrated when a histogram cannot be:
+  # its bars must average to the panel's own n / bins.
+  ref <- function(n) {
+    e <- n / bins
+    b <- 1.96 * sqrt(e * (1 - 1 / bins))
+    data.frame(expected = e, ymin = pmax(0, e - b), ymax = e + b, pit = 0)
+  }
+  if (has_group) {
+    n_per <- tapply(!is.na(df$pit), df$group, sum)
+    n_per <- n_per[!is.na(n_per) & n_per > 0]
+    bands <- ref(as.numeric(n_per))
+    bands$group <- if (is.factor(df$group)) {
+      factor(names(n_per), levels = levels(df$group))
+    } else {
+      names(n_per)
+    }
+  } else {
+    bands <- ref(sum(!is.na(df$pit)))
+  }
 
   p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[["pit"]])) +
-    ggplot2::annotate("rect", xmin = 0, xmax = 1,
-                      ymin = max(0, expected - band), ymax = expected + band,
-                      fill = "grey80", alpha = 0.5) +
+    ggplot2::geom_rect(data = bands, inherit.aes = FALSE,
+                       ggplot2::aes(ymin = .data[["ymin"]],
+                                    ymax = .data[["ymax"]]),
+                       xmin = 0, xmax = 1, fill = "grey80", alpha = 0.5) +
     ggplot2::geom_histogram(breaks = breaks, boundary = 0,
                             fill = "steelblue", color = "white") +
-    ggplot2::geom_hline(yintercept = expected, linetype = "dashed",
-                        color = "grey40") +
-    ggplot2::labs(x = "PIT", y = "Count",
-                  title = "PIT histogram (calibration)") +
+    ggplot2::geom_hline(data = bands, inherit.aes = FALSE,
+                        ggplot2::aes(yintercept = .data[["expected"]]),
+                        linetype = "dashed", color = "grey40") +
+    ggplot2::labs(x = "PIT", y = "Count") +
     et_theme()
 
   if (has_group) p <- p + ggplot2::facet_wrap(ggplot2::vars(.data[["group"]]))
