@@ -28,10 +28,10 @@
 #'     the in-sample / out-of-sample distinction handled explicitly. Predicting
 #'     for a group the fit has \emph{seen} uses that group's estimated effect:
 #'     the effect is a parameter, its posterior uncertainty is part of
-#'     \code{param_var}, and there is no separate group channel (conditioning on
+#'     \code{param_var}, and there is no separate group component (conditioning on
 #'     a known group \emph{reduces} predictive variance relative to the
 #'     population level). Predicting for a \emph{new} level integrates over the
-#'     group-level distribution and adds a \code{group_var} channel carrying the
+#'     group-level distribution and adds a \code{group_var} component carrying the
 #'     between-group variance; \code{\link{et_predict}} detects new levels
 #'     automatically. The \code{grouping} argument here is a \emph{separate}
 #'     device: it fits one independent model per group (no pooling), not a
@@ -95,6 +95,19 @@
 #'   A prior the caller supplies for these classes is never overridden.
 #'   Regardless of the setting, \code{et_fit()} warns after fitting when more
 #'   than 5\% of the posterior sits at \eqn{|\phi| \ge 1}.
+#'
+#'   \strong{Families and autocorrelation.} \code{brms} represents an
+#'   autocorrelation term in two ways, and only one of them can be forecast
+#'   from. For \code{gaussian} and \code{student} it uses the response
+#'   residuals (\eqn{\varepsilon = y - \mu}) and iterates the fitted process
+#'   onto new rows, which is what \code{\link{et_predict}} needs. For any
+#'   other family with \code{brms}'s default \code{cov = FALSE} the term
+#'   becomes a vector of \emph{latent} residuals that \code{brms} cannot
+#'   extend beyond the training rows, so \code{et_fit()} stops with an
+#'   explanation rather than letting the fit succeed and the prediction fail.
+#'   Write such a term as \code{ar(time = year, p = 1, cov = TRUE)}. Because
+#'   the covariance formulation exists at order one only, a non-Gaussian family
+#'   cannot carry an autocorrelation term beyond lag 1 in \code{brms} at all.
 #' @param silent Integer passed to \code{brms::brm()} (default 2, no Stan
 #'   output).
 #' @param ... Additional arguments passed to \code{brms::brm()}.
@@ -150,6 +163,28 @@ et_fit <- function(formula,
       priors <- NULL
     }
   }
+
+  # A non-Gaussian family with an autocorrelation term is only predictable when
+  # the term sets cov = TRUE (see .check_autocor_family). Check it here, before
+  # Stan compiles anything: brms fits the cov = FALSE form happily and only
+  # et_predict() discovers that the latent residuals cannot be extended.
+  # family arrives through ... on its way to brms::brm().
+  .fam_arg <- list(...)$family
+  .check_autocor_family(
+    formula = formula,
+    family  = if (is.null(.fam_arg)) {
+      NULL
+    } else if (inherits(.fam_arg, c("family", "brmsfamily", "customfamily"))) {
+      .fam_arg
+    } else if (is.function(.fam_arg)) {
+      tryCatch(.fam_arg(), error = function(e) NULL)
+    } else if (is.character(.fam_arg)) {
+      list(family = .fam_arg)
+    } else {
+      NULL
+    },
+    stage = "fit"
+  )
 
   if (!is.null(grouping)) {
     result <- .et_fit_grouped(
@@ -308,7 +343,7 @@ et_fit <- function(formula,
 # lets the posterior straddle |phi| >= 1, and the k-step-ahead forecast variance
 # sigma^2 (1 - phi^(2k)) / (1 - phi^2) then diverges. The downstream symptoms are
 # a heavy-tailed predictive distribution, a temporal_var that swamps every other
-# channel, and a shelf-life ratio that explodes.
+# component, and a shelf-life ratio that explodes.
 #
 # Defaults:
 #   "weakly_informative" (default) -- normal(0, 0.5), which places ~95% of the
@@ -524,7 +559,7 @@ et_fit <- function(formula,
 #'
 #' @section What the pipeline reads off the fit:
 #' Four things: the posterior draws; the response family, for the variance
-#' function of the residual channel; the model formula, to find the response
+#' function of the residual component; the model formula, to find the response
 #' column and to detect an \code{ar()}-family term; and the training data, to
 #' continue an autocorrelated series forward and to set the default
 #' \code{response_scale} in \code{\link{shelf_life}}. A \code{brmsfit} carries

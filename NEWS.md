@@ -1,3 +1,76 @@
+# ErrorTracer 1.4.3
+
+Makes the variance budget as tight as the fit allows.
+
+## Changes to default behaviour
+
+* **`et_predict(n_draws =)` now defaults to every draw in the fit**, not to
+  2000. This matters more than it sounds. Since 1.4.0 `total_var` is the
+  *measured* variance of the predictive draws rather than the sum of the
+  components, so for an iid model the `closure_gap` is exactly the Monte Carlo
+  error of that measurement. Subsampling a fit that already holds more draws
+  therefore widens the gap for no gain: the draws are paid for at sampling
+  time, and prediction is matrix work.
+
+  Measured on a 90-observation Gaussian fit, the per-observation gap has mean
+  zero throughout but its spread across observations falls from 4.0% of
+  `total_var` at 2000 draws to 1.2% at 8000. Reported component shares
+  consequently add to the measured total far more closely, and the credible
+  intervals, PIT values and shelf-life quantiles are all better resolved at
+  the same time, since they are computed from the same draws.
+
+  Pass an integer to bound memory on very wide `newdata`; it is still capped
+  at the draws available. An informational message fires when the draw matrix
+  would be large, naming `n_draws` as the knob.
+
+  **This changes reported numbers.** Any decomposition, interval, PIT,
+  calibration or shelf life produced with the old default is a noisier
+  estimate of the same quantity, not a different quantity, but it will not
+  reproduce exactly.
+
+## Bug fixes
+
+* **A non-Gaussian family with an `ar()` term no longer fits and then fails to
+  predict.** `brms` carries an autocorrelation term as response residuals for
+  `gaussian` and `student`, but as a vector of *latent* residuals for every
+  other family under its default `cov = FALSE` — and it cannot extend latent
+  residuals to new rows. So `et_fit(y ~ x + ar(time = t), family = poisson())`
+  compiled, sampled and returned a model, and `et_predict()` then died several
+  frames inside `brms` with "Cannot predict new latent residuals", no remedy
+  offered.
+
+  `et_fit()` now stops before Stan is invoked (measured at 0.03 s against tens
+  of seconds of compilation) and names the fix, `cov = TRUE`. `et_predict()`
+  carries the same check, because a fit can also arrive through
+  `as_et_model()`. Gaussian and student models are untouched: a Portal-style
+  `ar(cov = FALSE)` fit predicts bit-identically to 1.4.2.
+
+  Note one consequence the message states: `brms` offers the covariance
+  formulation at order one only, so a non-Gaussian family cannot carry an
+  autocorrelation term beyond lag 1 at all.
+
+* **The non-Gaussian `ar(cov = TRUE)` path now warns that its draws may leave
+  the response support.** That path keeps the location-shift construction,
+  because `y - mu` is what carries the `brms` forward iteration, so it is a
+  first-order approximation of a draw from the family at the perturbed mean.
+  The documentation said exactly that and stopped there, which understated it:
+  on a small-count Poisson fit, **12.3% of the env-inclusive draws were
+  negative, every one was non-integer, and 41 of 60 credible-interval rows had
+  a negative lower bound.** The informational message is now a warning that
+  says so and points at `env_noise = NULL` for exact draws. The construction
+  itself is unchanged; replacing it needs the latent AR term propagated on the
+  link scale, which is future work.
+
+## Documentation
+
+* **One word for one thing: the pieces of the variance budget are
+  *components*.** The documentation, the code comments and the five
+  informational messages that mention them had drifted between *channel* and
+  *component* for the same quantity. They now all say *component*, matching the
+  column names (`param_var`, `env_var`, `resid_var`, `temporal_var`,
+  `group_var`) and the accompanying paper. No argument, column or return value
+  changed.
+
 # ErrorTracer 1.4.2
 
 Lets a model fitted outside the package enter the pipeline. Stages 1 and 2 are

@@ -11,7 +11,7 @@ et_predict(
   env_cov = NULL,
   env_dist = NULL,
   env_ensemble = NULL,
-  n_draws = 2000L,
+  n_draws = NULL,
   ci_levels = c(0.5, 0.8, 0.9, 0.95),
   n_perturb = NULL,
   n_env_draws = 1L,
@@ -138,8 +138,14 @@ credible interval by default.  This is the recommended way to build a
 genuine \emph{reforecast} in which only information available at the issue
 date is used.}
 
-\item{n_draws}{Integer.  Number of posterior draws to use (default 2000;
-capped at the number of draws available in the fit).}
+\item{n_draws}{Integer or \code{NULL}.  Number of posterior draws to use.
+The default \code{NULL} uses \emph{every} draw the fit holds, which is
+almost always what you want: \code{total_var} is the \strong{measured}
+variance of the predictive draws, so its Monte Carlo error is what the iid
+\code{closure_gap} reports, and subsampling widens that gap, and loosens
+every interval, PIT and shelf-life quantile, for nothing, since the draws
+are already computed.  Supply an integer only to bound memory on very wide
+\code{newdata}; it is capped at the draws available in the fit.}
 
 \item{ci_levels}{Numeric vector.  Credible interval levels to compute
 (default \code{c(0.5, 0.8, 0.9, 0.95)}).}
@@ -150,7 +156,7 @@ Reducing it speeds up the perturbation at the cost of a smaller sample for
 \emph{the whole env-inclusive budget}: the perturbed mean of draw \eqn{s}
 must be paired with the residual of that same draw \eqn{s}, so when
 \code{n_perturb < n_draws} and environmental uncertainty is present, the
-predictive draws and every decomposition channel are computed on the first
+predictive draws and every decomposition component are computed on the first
 \code{n_perturb} draws rather than recycling the perturbation across all
 of them.  Recycling would destroy
 \eqn{\mathrm{Cov}(\mu^{(s)}, y^{pp,(s)} - \mu^{(s)})}, which is
@@ -208,7 +214,7 @@ reported interval deliberately narrower than \code{total_var} implies,
 since \code{total_var} is always the variance of the env-inclusive draws.}
 
 \item{var_trim}{Numeric in \eqn{[0, 0.5)}, default \code{0}.  Winsorization
-  applied when computing \emph{every} variance channel of the decomposition:
+  applied when computing \emph{every} variance component of the decomposition:
   each column of draws is clipped to its
   \eqn{[\code{var\_trim},\, 1 - \code{var\_trim}]} quantiles before
   \code{var()}.  The default \code{0} is the plain sample variance, so the
@@ -216,7 +222,7 @@ since \code{total_var} is always the variance of the env-inclusive draws.}
   interval is drawn from.  A non-zero value trades that coherence for
   robustness against a heavy-tailed predictive distribution, and is applied
   uniformly across \code{param_var}, \code{env_var}, the posterior-predictive
-  variance and hence \code{temporal_var} — never to one channel only, which
+  variance and hence \code{temporal_var} — never to one component only, which
   would bias their differences.
 
   Winsorizing is \strong{not} the right remedy for a near-unit-root
@@ -264,7 +270,7 @@ An \code{et_prediction} object (list) containing:
     iid ones.
     All components are on the \strong{response scale}.
     \code{total_var} is the \strong{measured} variance of the env-inclusive
-    predictive draws, not the sum of the channels; see
+    predictive draws, not the sum of the components; see
     \code{\link{decompose_uncertainty}}.
     \code{v_env_mcse} is the Monte Carlo SE of \code{env_var}.
     \code{residual_var} is per-observation for non-Gaussian families
